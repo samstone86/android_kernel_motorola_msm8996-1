@@ -5377,6 +5377,7 @@ static struct addrconf_sysctl_table
 			.maxlen         = sizeof(int),
 			.mode           = 0644,
 			.proc_handler   = proc_dointvec,
+
 		},
 		{
 			/* sentinel */

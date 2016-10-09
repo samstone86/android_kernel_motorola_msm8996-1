@@ -2370,7 +2370,7 @@ static u32 get_autorefresh_timeout(struct mdss_mdp_ctl *ctl,
 		line_count = mdss_mdp_pingpong_read(mixer->pingpong_base,
 			MDSS_MDP_REG_PP_SYNC_CONFIG_HEIGHT) & 0xffff;
 
-	fps = mdss_panel_get_framerate(pinfo);
+	fps = mdss_panel_get_framerate(pinfo, FPS_RESOLUTION_HZ);
 	v_total = mdss_panel_get_vtotal(pinfo);
 
 	/*
@@ -2532,6 +2532,11 @@ static int mdss_mdp_disable_autorefresh(struct mdss_mdp_ctl *ctl,
 
 	/* disable autorefresh */
 	mdss_mdp_pingpong_write(pp_base, MDSS_MDP_REG_PP_AUTOREFRESH_CONFIG, 0);
+
+	if (is_pingpong_split(ctl->mfd))
+		mdss_mdp_pingpong_write(mdata->slave_pingpong_base,
+				MDSS_MDP_REG_PP_AUTOREFRESH_CONFIG, 0);
+
 	ctx->autorefresh_state = MDP_AUTOREFRESH_OFF;
 	ctx->autorefresh_frame_cnt = 0;
 
@@ -2549,6 +2554,9 @@ static int mdss_mdp_disable_autorefresh(struct mdss_mdp_ctl *ctl,
 static void __mdss_mdp_kickoff(struct mdss_mdp_ctl *ctl,
 	struct mdss_mdp_cmd_ctx *ctx)
 {
+	struct mdss_data_type *mdata = mdss_mdp_get_mdata();
+	bool is_pp_split = is_pingpong_split(ctl->mfd);
+
 	MDSS_XLOG(ctx->autorefresh_state);
 
 	if ((ctx->autorefresh_state == MDP_AUTOREFRESH_ON_REQUESTED) ||
@@ -2561,8 +2569,14 @@ static void __mdss_mdp_kickoff(struct mdss_mdp_ctl *ctl,
 		mdss_mdp_pingpong_write(ctl->mixer_left->pingpong_base,
 			MDSS_MDP_REG_PP_AUTOREFRESH_CONFIG,
 			BIT(31) | ctx->autorefresh_frame_cnt);
+
+		if (is_pp_split)
+			mdss_mdp_pingpong_write(mdata->slave_pingpong_base,
+				MDSS_MDP_REG_PP_AUTOREFRESH_CONFIG,
+				BIT(31) | ctx->autorefresh_frame_cnt);
+
 		MDSS_XLOG(0x11, ctx->autorefresh_frame_cnt,
-			ctx->autorefresh_state);
+			ctx->autorefresh_state, is_pp_split);
 		ctx->autorefresh_state = MDP_AUTOREFRESH_ON;
 
 	} else {

@@ -42,7 +42,6 @@
 #include <linux/devfreq.h>
 #include <linux/nls.h>
 #include <linux/of.h>
-#include <linux/kthread.h>
 #include "ufshcd.h"
 #include "ufshci.h"
 #include "ufs_quirks.h"
@@ -72,6 +71,7 @@ static int ufshcd_tag_req_type(struct request *rq)
 
 static void ufshcd_update_error_stats(struct ufs_hba *hba, int type)
 {
+	ufsdbg_set_err_state(hba);
 	if (type < UFS_ERR_MAX)
 		hba->ufs_stats.err_stats[type]++;
 }
@@ -1218,6 +1218,21 @@ int ufshcd_hold(struct ufs_hba *hba, bool async)
 start:
 	switch (hba->clk_gating.state) {
 	case CLKS_ON:
+		/*
+		 * Wait for the ungate work to complete if in progress.
+		 * Though the clocks may be in ON state, the link could
+		 * still be in hibner8 state if hibern8 is allowed
+		 * during clock gating.
+		 * Make sure we exit hibern8 state also in addition to
+		 * clocks being ON.
+		 */
+		if (ufshcd_can_hibern8_during_gating(hba) &&
+		    ufshcd_is_link_hibern8(hba)) {
+			spin_unlock_irqrestore(hba->host->host_lock, flags);
+			flush_work(&hba->clk_gating.ungate_work);
+			spin_lock_irqsave(hba->host->host_lock, flags);
+			goto start;
+		}
 		break;
 	case REQ_CLKS_OFF:
 		if (cancel_delayed_work(&hba->clk_gating.gate_work)) {
@@ -2110,6 +2125,9 @@ ufshcd_wait_for_uic_cmd(struct ufs_hba *hba, struct uic_command *uic_cmd)
 	else
 		ret = -ETIMEDOUT;
 
+	if (ret)
+		ufsdbg_set_err_state(hba);
+
 	spin_lock_irqsave(hba->host->host_lock, flags);
 	hba->active_uic_cmd = NULL;
 	spin_unlock_irqrestore(hba->host->host_lock, flags);
@@ -2536,6 +2554,13 @@ static int ufshcd_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmd)
 		return SCSI_MLQUEUE_HOST_BUSY;
 
 	spin_lock_irqsave(hba->host->host_lock, flags);
+
+	/* if error handling is in progress, return host busy */
+	if (ufshcd_eh_in_progress(hba)) {
+		err = SCSI_MLQUEUE_HOST_BUSY;
+		goto out_unlock;
+	}
+
 	switch (hba->ufshcd_state) {
 	case UFSHCD_STATE_OPERATIONAL:
 		break;
@@ -2550,13 +2575,6 @@ static int ufshcd_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmd)
 		dev_WARN_ONCE(hba->dev, 1, "%s: invalid state %d\n",
 				__func__, hba->ufshcd_state);
 		set_host_byte(cmd, DID_BAD_TARGET);
-		cmd->scsi_done(cmd);
-		goto out_unlock;
-	}
-
-	/* if error handling is in progress, don't issue commands */
-	if (ufshcd_eh_in_progress(hba)) {
-		set_host_byte(cmd, DID_ERROR);
 		cmd->scsi_done(cmd);
 		goto out_unlock;
 	}
@@ -2789,6 +2807,9 @@ static int ufshcd_wait_for_dev_cmd(struct ufs_hba *hba,
 		 */
 		ufshcd_outstanding_req_clear(hba, lrbp->task_tag);
 	}
+
+	if (err)
+		ufsdbg_set_err_state(hba);
 
 	return err;
 }
@@ -3822,6 +3843,9 @@ static int ufshcd_uic_pwr_ctrl(struct ufs_hba *hba, struct uic_command *cmd)
 		ret = (status != PWR_OK) ? status : -1;
 	}
 out:
+	if (ret)
+		ufsdbg_set_err_state(hba);
+
 	ufshcd_save_tstamp_of_last_dme_cmd(hba);
 	spin_lock_irqsave(hba->host->host_lock, flags);
 	hba->active_uic_cmd = NULL;
@@ -3926,31 +3950,49 @@ out:
 
 static int ufshcd_link_recovery(struct ufs_hba *hba)
 {
-	int ret;
+	int ret = 0;
 	unsigned long flags;
 
-	spin_lock_irqsave(hba->host->host_lock, flags);
-	hba->ufshcd_state = UFSHCD_STATE_RESET;
-	ufshcd_set_eh_in_progress(hba);
+	/*
+	 * Check if there is any race with fatal error handling.
+	 * If so, wait for it to complete. Even though fatal error
+	 * handling does reset and restore in some cases, don't assume
+	 * anything out of it. We are just avoiding race here.
+	 */
+	do {
+		spin_lock_irqsave(hba->host->host_lock, flags);
+		if (!(work_pending(&hba->eh_work) ||
+				hba->ufshcd_state == UFSHCD_STATE_RESET))
+			break;
+		spin_unlock_irqrestore(hba->host->host_lock, flags);
+		dev_dbg(hba->dev, "%s: reset in progress\n", __func__);
+		flush_work(&hba->eh_work);
+	} while (1);
+
+
+	/*
+	 * we don't know if previous reset had really reset the host controller
+	 * or not. So let's force reset here to be sure.
+	 */
+	hba->ufshcd_state = UFSHCD_STATE_ERROR;
+	hba->force_host_reset = true;
+	schedule_work(&hba->eh_work);
+
+	/* wait for the reset work to finish */
+	do {
+		if (!(work_pending(&hba->eh_work) ||
+				hba->ufshcd_state == UFSHCD_STATE_RESET))
+			break;
+		spin_unlock_irqrestore(hba->host->host_lock, flags);
+		dev_dbg(hba->dev, "%s: reset in progress\n", __func__);
+		flush_work(&hba->eh_work);
+		spin_lock_irqsave(hba->host->host_lock, flags);
+	} while (1);
+
+	if (!((hba->ufshcd_state == UFSHCD_STATE_OPERATIONAL) &&
+	      ufshcd_is_link_active(hba)))
+		ret = -ENOLINK;
 	spin_unlock_irqrestore(hba->host->host_lock, flags);
-
-	ret = ufshcd_vops_full_reset(hba);
-	if (ret)
-		dev_warn(hba->dev,
-			"full reset returned %d, trying to recover the link\n",
-			ret);
-
-	ret = ufshcd_host_reset_and_restore(hba);
-
-	spin_lock_irqsave(hba->host->host_lock, flags);
-	if (ret)
-		hba->ufshcd_state = UFSHCD_STATE_ERROR;
-	ufshcd_clear_eh_in_progress(hba);
-	spin_unlock_irqrestore(hba->host->host_lock, flags);
-
-	if (ret)
-		dev_err(hba->dev, "%s: link recovery failed, err %d",
-			__func__, ret);
 
 	return ret;
 }
@@ -3974,8 +4016,7 @@ static int __ufshcd_uic_hibern8_enter(struct ufs_hba *hba)
 		 * If link recovery fails then return error so that caller
 		 * don't retry the hibern8 enter again.
 		 */
-		if (ufshcd_link_recovery(hba))
-			ret = -ENOLINK;
+		ret = ufshcd_link_recovery(hba);
 	} else {
 		dev_dbg(hba->dev, "%s: Hibern8 Enter at %lld us", __func__,
 			ktime_to_us(ktime_get()));
@@ -4106,8 +4147,6 @@ int ufshcd_change_power_mode(struct ufs_hba *hba,
 			     struct ufs_pa_layer_attr *pwr_mode)
 {
 	int ret = 0;
-	int retries = 5;
-	static int failure_count;
 
 	/* if already configured to the requested pwr_mode */
 	if (pwr_mode->gear_rx == hba->pwr_info.gear_rx &&
@@ -4170,35 +4209,14 @@ int ufshcd_change_power_mode(struct ufs_hba *hba,
 	ufshcd_dme_set(hba, UIC_ARG_MIB(DME_LocalAFC0ReqTimeOutVal),
 			DL_AFC0ReqTimeOutVal_Default);
 
-	do {
-		ret = ufshcd_uic_change_pwr_mode(hba, pwr_mode->pwr_rx << 4
+	ret = ufshcd_uic_change_pwr_mode(hba, pwr_mode->pwr_rx << 4
 			| pwr_mode->pwr_tx);
-	} while (ret && retries--);
 
 	if (ret) {
 		ufshcd_update_error_stats(hba, UFS_ERR_POWER_MODE_CHANGE);
 		dev_err(hba->dev,
 			"%s: power mode change failed %d\n", __func__, ret);
-
-		dev_err(hba->dev, "[RX,TX]current gear=[%d,%d],lane[%d,%d],pwr[%d,%d],rate=[%d]\n",
-			hba->pwr_info.gear_rx, hba->pwr_info.gear_tx,
-			hba->pwr_info.lane_rx, hba->pwr_info.lane_tx,
-			hba->pwr_info.pwr_rx, hba->pwr_info.pwr_tx,
-			hba->pwr_info.hs_rate);
-
-		dev_err(hba->dev, "[RX,TX]new gear=[%d,%d],lane[%d,%d] pwr[%d,%d],rate=[%d]\n",
-			pwr_mode->gear_rx, pwr_mode->gear_tx,
-			pwr_mode->lane_rx, pwr_mode->lane_tx,
-			pwr_mode->pwr_rx, pwr_mode->pwr_tx,
-			pwr_mode->hs_rate);
-		ufshcd_print_host_state(hba);
-
-		if (++failure_count > 10)
-			BUG();
-
 	} else {
-		failure_count = 0;
-
 		ufshcd_vops_pwr_change_notify(hba, POST_CHANGE, NULL,
 						pwr_mode);
 
@@ -4940,6 +4958,11 @@ ufshcd_transfer_rsp_status(struct ufs_hba *hba, struct ufshcd_lrb *lrbp)
 			ocs == OCS_MISMATCH_DATA_BUF_SIZE);
 		ufshcd_print_trs(hba, 1 << lrbp->task_tag, print_prdt);
 	}
+
+	if ((host_byte(result) == DID_ERROR) ||
+	    (host_byte(result) == DID_ABORT))
+		ufsdbg_set_err_state(hba);
+
 	return result;
 }
 
@@ -5525,10 +5548,9 @@ static void ufshcd_err_handler(struct work_struct *work)
 
 	hba = container_of(work, struct ufs_hba, eh_work);
 
-	pm_runtime_get_sync(hba->dev);
-	ufshcd_hold_all(hba);
-
 	spin_lock_irqsave(hba->host->host_lock, flags);
+	ufsdbg_set_err_state(hba);
+
 	if (hba->ufshcd_state == UFSHCD_STATE_RESET)
 		goto out;
 
@@ -5564,7 +5586,8 @@ static void ufshcd_err_handler(struct work_struct *work)
 		}
 	}
 
-	if ((hba->saved_err & INT_FATAL_ERRORS) || hba->saved_ce_err ||
+	if ((hba->saved_err & INT_FATAL_ERRORS)
+	    || hba->saved_ce_err || hba->force_host_reset ||
 	    ((hba->saved_err & UIC_ERROR) &&
 	    (hba->saved_uic_err & (UFSHCD_UIC_DL_PA_INIT_ERROR |
 				   UFSHCD_UIC_DL_NAC_RECEIVED_ERROR |
@@ -5652,6 +5675,7 @@ skip_pending_xfer_clear:
 		hba->saved_err = 0;
 		hba->saved_uic_err = 0;
 		hba->saved_ce_err = 0;
+		hba->force_host_reset = false;
 	}
 
 skip_err_handling:
@@ -5663,12 +5687,9 @@ skip_err_handling:
 	}
 
 	hba->silence_err_logs = false;
-	ufshcd_clear_eh_in_progress(hba);
 out:
+	ufshcd_clear_eh_in_progress(hba);
 	spin_unlock_irqrestore(hba->host->host_lock, flags);
-	ufshcd_scsi_unblock_requests(hba);
-	ufshcd_release_all(hba);
-	pm_runtime_put_sync(hba->dev);
 }
 
 static void ufshcd_update_uic_reg_hist(struct ufs_uic_err_reg_hist *reg_hist,
@@ -5769,8 +5790,11 @@ static void ufshcd_check_errors(struct ufs_hba *hba)
 
 		/* handle fatal errors only when link is functional */
 		if (hba->ufshcd_state == UFSHCD_STATE_OPERATIONAL) {
-			/* block commands from scsi mid-layer */
-			__ufshcd_scsi_block_requests(hba);
+			/*
+			 * Set error handling in progress flag early so that we
+			 * don't issue new requests any more.
+			 */
+			ufshcd_set_eh_in_progress(hba);
 
 			hba->ufshcd_state = UFSHCD_STATE_ERROR;
 			schedule_work(&hba->eh_work);
@@ -6274,6 +6298,11 @@ static int ufshcd_reset_and_restore(struct ufs_hba *hba)
 	int retries = MAX_HOST_RESET_RETRIES;
 
 	do {
+		err = ufshcd_vops_full_reset(hba);
+		if (err)
+			dev_warn(hba->dev, "%s: full reset returned %d\n",
+				 __func__, err);
+
 		err = ufshcd_host_reset_and_restore(hba);
 	} while (err && --retries);
 
@@ -6297,13 +6326,12 @@ static int ufshcd_reset_and_restore(struct ufs_hba *hba)
  */
 static int ufshcd_eh_host_reset_handler(struct scsi_cmnd *cmd)
 {
-	int err;
+	int err = SUCCESS;
 	unsigned long flags;
 	struct ufs_hba *hba;
 
 	hba = shost_priv(cmd->device->host);
 
-	ufshcd_hold_all(hba);
 	/*
 	 * Check if there is any race with fatal error handling.
 	 * If so, wait for it to complete. Even though fatal error
@@ -6316,34 +6344,36 @@ static int ufshcd_eh_host_reset_handler(struct scsi_cmnd *cmd)
 				hba->ufshcd_state == UFSHCD_STATE_RESET))
 			break;
 		spin_unlock_irqrestore(hba->host->host_lock, flags);
-		dev_dbg(hba->dev, "%s: reset in progress\n", __func__);
+		dev_err(hba->dev, "%s: reset in progress - 1\n", __func__);
 		flush_work(&hba->eh_work);
 	} while (1);
 
-	hba->ufshcd_state = UFSHCD_STATE_RESET;
-	ufshcd_set_eh_in_progress(hba);
-	spin_unlock_irqrestore(hba->host->host_lock, flags);
+	/*
+	 * we don't know if previous reset had really reset the host controller
+	 * or not. So let's force reset here to be sure.
+	 */
+	hba->ufshcd_state = UFSHCD_STATE_ERROR;
+	hba->force_host_reset = true;
+	schedule_work(&hba->eh_work);
 
-	ufshcd_update_error_stats(hba, UFS_ERR_EH);
-	err = ufshcd_reset_and_restore(hba);
+	/* wait for the reset work to finish */
+	do {
+		if (!(work_pending(&hba->eh_work) ||
+				hba->ufshcd_state == UFSHCD_STATE_RESET))
+			break;
+		spin_unlock_irqrestore(hba->host->host_lock, flags);
+		dev_err(hba->dev, "%s: reset in progress - 2\n", __func__);
+		flush_work(&hba->eh_work);
+		spin_lock_irqsave(hba->host->host_lock, flags);
+	} while (1);
 
-	spin_lock_irqsave(hba->host->host_lock, flags);
-	if (!err) {
-		err = SUCCESS;
-		hba->ufshcd_state = UFSHCD_STATE_OPERATIONAL;
-	} else {
+	if (!((hba->ufshcd_state == UFSHCD_STATE_OPERATIONAL) &&
+	      ufshcd_is_link_active(hba))) {
 		err = FAILED;
 		hba->ufshcd_state = UFSHCD_STATE_ERROR;
 	}
-	ufshcd_clear_eh_in_progress(hba);
+
 	spin_unlock_irqrestore(hba->host->host_lock, flags);
-
-	ufshcd_release_all(hba);
-
-	if (err == FAILED) {
-		pr_err("%s, fail to recovery ufs", __func__);
-		BUG();
-	}
 
 	return err;
 }
@@ -7083,44 +7113,6 @@ out:
 	return err;
 }
 
-
-int ufshcd_get_serialnumber(struct ufs_hba *hba, char *serialnumber)
-{
-	int err;
-	u8 sn_index;
-	u8 *desc_buf;
-
-	desc_buf = kzalloc(QUERY_DESC_STRING_MAX_SIZE, GFP_KERNEL);
-	if (!desc_buf) {
-		err =  -ENOMEM;
-		return err;
-	}
-
-	err = ufshcd_read_device_desc(hba, desc_buf,
-				QUERY_DESC_DEVICE_MAX_SIZE);
-	if (err) {
-		dev_err(hba->dev, "%s: Read device desc failed\n", __func__);
-		goto out;
-	}
-
-	sn_index = desc_buf[DEVICE_DESC_PARAM_SN];
-	memset(desc_buf, 0, QUERY_DESC_STRING_MAX_SIZE);
-	err = ufshcd_read_string_desc(hba, sn_index, desc_buf,
-					QUERY_DESC_STRING_MAX_SIZE, ASCII_STD);
-	if (err) {
-		dev_err(hba->dev, "%s: Read SN string failed\n", __func__);
-		goto out;
-	}
-
-	strlcpy(serialnumber, (desc_buf + QUERY_DESC_HDR_SIZE),
-		min_t(u8, desc_buf[QUERY_DESC_LENGTH_OFFSET] -2,
-		      QUERY_DESC_STRING_MAX_SIZE));
-out:
-	kfree(desc_buf);
-	return err;
-}
-
-
 /**
  * ufshcd_ioctl - ufs ioctl callback registered in scsi_host
  * @dev: scsi device required for per LUN queries
@@ -7134,7 +7126,6 @@ static int ufshcd_ioctl(struct scsi_device *dev, int cmd, void __user *buffer)
 {
 	struct ufs_hba *hba = shost_priv(dev->host);
 	int err = 0;
-	char *buf;
 
 	BUG_ON(!hba);
 	if (!buffer) {
@@ -7149,26 +7140,6 @@ static int ufshcd_ioctl(struct scsi_device *dev, int cmd, void __user *buffer)
 				buffer);
 		pm_runtime_put_sync(hba->dev);
 		break;
-	case UFS_IOCTL_GETSN:
-
-		buf = kzalloc(QUERY_DESC_STRING_MAX_SIZE, GFP_KERNEL);
-		pm_runtime_get_sync(hba->dev);
-		err = ufshcd_get_serialnumber(hba, buf);
-		pm_runtime_put_sync(hba->dev);
-
-		if (err) {
-			dev_err(hba->dev, "%s: Failed get serial number.\n", __func__);
-			kfree(buf);
-			return err;
-		}
-
-		err = copy_to_user(buffer, buf, strlen(buf));
-		if(err)
-			dev_err(hba->dev, "%s: Failed copying back to user.\n",
-				__func__);
-		kfree(buf);
-		break;
-
 	default:
 		err = -ENOIOCTLCMD;
 		dev_dbg(hba->dev, "%s: Unsupported ioctl cmd %d\n", __func__,
@@ -8513,33 +8484,11 @@ static inline void ufshcd_add_sysfs_nodes(struct ufs_hba *hba)
  */
 int ufshcd_shutdown(struct ufs_hba *hba)
 {
-	int ret = 0;
-	struct Scsi_Host *host = hba->host;
-	unsigned long flags;
-
-	if (ufshcd_is_ufs_dev_poweroff(hba) && ufshcd_is_link_off(hba))
-		goto out;
-
-	if (pm_runtime_suspended(hba->dev)) {
-		ret = ufshcd_runtime_resume(hba);
-		if (ret)
-			goto out;
-	}
-
-	if (host->ehandler)
-		kthread_stop(host->ehandler);
-
-	ret = ufshcd_suspend(hba, UFS_SHUTDOWN_PM);
-
-	spin_lock_irqsave(host->host_lock, flags);
-	scsi_block_requests(host);
-	hba->is_powered = false;
-	spin_unlock_irqrestore(host->host_lock, flags);
-
-out:
-	if (ret)
-		dev_err(hba->dev, "%s failed, err %d\n", __func__, ret);
-	/* allow force shutdown even in case of errors */
+	/*
+	 * TODO: This function should send the power down notification to
+	 * UFS device and then power off the UFS link. But we need to be sure
+	 * that there will not be any new UFS requests issued after this.
+	 */
 	return 0;
 }
 EXPORT_SYMBOL(ufshcd_shutdown);

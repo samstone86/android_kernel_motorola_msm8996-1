@@ -727,8 +727,8 @@ static int qpnp_lab_dt_init(struct qpnp_labibb *labibb,
 			REG_LAB_LCD_AMOLED_SEL, &val, 1);
 
 	if (rc) {
-		pr_err("write to register %x failed rc = %d\n", REG_LAB_VOLTAGE,
-			rc);
+		pr_err("qpnp_lab_sec_write register %x failed rc = %d\n",
+			REG_LAB_LCD_AMOLED_SEL, rc);
 		return rc;
 	}
 
@@ -933,9 +933,8 @@ static int qpnp_lab_dt_init(struct qpnp_labibb *labibb,
 				val);
 
 	if (rc) {
-		pr_err("qpnp_lab_regulator_set_voltage write register %x failed rc = %d\n",
-			REG_LAB_VOLTAGE, rc);
-
+		pr_err("write to register %x failed rc = %d\n", REG_LAB_VOLTAGE,
+			rc);
 		return rc;
 	}
 
@@ -2332,7 +2331,6 @@ static int qpnp_ibb_regulator_set_voltage(struct regulator_dev *rdev,
 	if (rc) {
 		pr_err("write to register %x failed rc = %d\n", REG_IBB_VOLTAGE,
 			rc);
-
 		return rc;
 	}
 
@@ -2808,10 +2806,10 @@ static int qpnp_labibb_regulator_probe(struct spmi_device *spmi)
 		if (rc)
 			labibb->swire_2nd_cmd_delay =
 					SWIRE_DEFAULT_2ND_CMD_DLY_MS;
+
 		rc = of_property_read_u32(labibb->dev->of_node,
 				"qcom,swire-ibb-ps-enable-delay",
 				&labibb->swire_ibb_ps_enable_delay);
-
 		if (rc)
 			labibb->swire_ibb_ps_enable_delay =
 					SWIRE_DEFAULT_IBB_PS_ENABLE_DLY_MS;

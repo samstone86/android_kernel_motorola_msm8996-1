@@ -132,14 +132,11 @@ struct hdmi_tx_ctrl {
 
 	struct hdmi_tx_pinctrl pin_res;
 
-#ifdef CONFIG_SLIMPORT_DYNAMIC_HPD
-	struct mutex mutex_hpd;
-#endif
 	struct mutex mutex;
 	struct mutex tx_lock;
 	struct list_head cable_notify_handlers;
 	struct kobject *kobj;
-	struct switch_dev *sdev;
+	struct switch_dev sdev;
 	struct workqueue_struct *workq;
 	spinlock_t hpd_state_lock;
 
