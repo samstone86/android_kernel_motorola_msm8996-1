@@ -217,6 +217,11 @@ static int xhci_plat_probe(struct platform_device *pdev)
 			(pdata && pdata->usb3_lpm_capable))
 		xhci->quirks |= XHCI_LPM_SUPPORT;
 
+	if (pdata && pdata->limit_arbitrary_sg) {
+		xhci_dbg(xhci, "limit arbitrary sg\n");
+		hcd->self.no_sg_constraint = 0;
+	}
+
 	hcd_to_bus(xhci->shared_hcd)->skip_resume = true;
 	/*
 	 * Set the xHCI pointer before xhci_plat_setup() (aka hcd_driver.reset)
@@ -264,6 +269,7 @@ static int xhci_plat_remove(struct platform_device *dev)
 	struct clk *clk = xhci->clk;
 
 	pm_runtime_disable(&dev->dev);
+	xhci->xhc_state |= XHCI_STATE_REMOVING;
 
 	device_remove_file(&dev->dev, &dev_attr_config_imod);
 	usb_remove_hcd(xhci->shared_hcd);
@@ -300,13 +306,19 @@ static int xhci_plat_runtime_suspend(struct device *dev)
 {
 	struct usb_hcd *hcd = dev_get_drvdata(dev);
 	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
+	int ret;
 
 	if (!xhci)
 		return 0;
 
 	dev_dbg(dev, "xhci-plat runtime suspend\n");
 
-	return xhci_suspend(xhci, true);
+	disable_irq(hcd->irq);
+	ret = xhci_suspend(xhci, true);
+	if (ret)
+		enable_irq(hcd->irq);
+
+	return ret;
 }
 
 static int xhci_plat_runtime_resume(struct device *dev)
@@ -321,6 +333,7 @@ static int xhci_plat_runtime_resume(struct device *dev)
 	dev_dbg(dev, "xhci-plat runtime resume\n");
 
 	ret = xhci_resume(xhci, false);
+	enable_irq(hcd->irq);
 	pm_runtime_mark_last_busy(dev);
 
 	return ret;

@@ -91,15 +91,13 @@ int32_t msm_sensor_free_sensor_data(struct msm_sensor_ctrl_t *s_ctrl)
 	kfree(s_ctrl->sensordata->power_info.power_down_setting);
 	kfree(s_ctrl->sensordata->csi_lane_params);
 	kfree(s_ctrl->sensordata->sensor_info);
-	kfree(s_ctrl->sensordata->power_info.clk_info);
+	msm_camera_put_clk_info(s_ctrl->pdev,
+		&s_ctrl->sensordata->power_info.clk_info,
+		&s_ctrl->sensordata->power_info.clk_ptr,
+		s_ctrl->sensordata->power_info.clk_info_size);
 	kfree(s_ctrl->sensordata);
 	return 0;
 }
-
-static struct msm_cam_clk_info cam_8974_clk_info[] = {
-	[SENSOR_CAM_MCLK] = {"cam_src_clk", 24000000},
-	[SENSOR_CAM_CLK] = {"cam_clk", 0},
-};
 
 int msm_sensor_power_down(struct msm_sensor_ctrl_t *s_ctrl)
 {
@@ -179,6 +177,30 @@ int msm_sensor_power_up(struct msm_sensor_ctrl_t *s_ctrl)
 		}
 	}
 
+	if (rc < 0 && s_ctrl->sensordata->cam_slave_info->slave_addr2 > 0) {
+		sensor_i2c_client->cci_client->sid =
+			s_ctrl->sensordata->cam_slave_info->slave_addr2 >> 1;
+		slave_info->sensor_slave_addr =
+			s_ctrl->sensordata->cam_slave_info->slave_addr2;
+		for (retry = 0; retry < 3; retry++) {
+			rc = msm_camera_power_up(power_info,
+					s_ctrl->sensor_device_type,
+					sensor_i2c_client);
+			if (rc < 0)
+				return rc;
+			rc = msm_sensor_check_id(s_ctrl);
+			if (rc < 0) {
+				msm_camera_power_down(power_info,
+						s_ctrl->sensor_device_type,
+						sensor_i2c_client);
+				msleep(20);
+				continue;
+			} else {
+				break;
+			}
+		}
+	}
+
 	return rc;
 }
 
@@ -205,6 +227,7 @@ int msm_sensor_match_id(struct msm_sensor_ctrl_t *s_ctrl)
 {
 	int rc = 0;
 	uint16_t chipid = 0;
+	uint16_t chipid_mask = 0;
 	struct msm_camera_i2c_client *sensor_i2c_client;
 	struct msm_camera_slave_info *slave_info;
 	const char *sensor_name;
@@ -233,9 +256,15 @@ int msm_sensor_match_id(struct msm_sensor_ctrl_t *s_ctrl)
 		return rc;
 	}
 
-	pr_debug("%s: read id: 0x%x expected id 0x%x:\n",
-			__func__, chipid, slave_info->sensor_id);
-	if (msm_sensor_id_by_mask(s_ctrl, chipid) != slave_info->sensor_id) {
+	CDBG("%s: read id: 0x%x expected id 0x%x: or 0x%x\n",
+		__func__, chipid,
+		slave_info->sensor_id, slave_info->sensor_id2);
+	chipid_mask = msm_sensor_id_by_mask(s_ctrl, chipid);
+	if (chipid_mask != slave_info->sensor_id) {
+		if (slave_info->sensor_id2 > 0) {
+			if (chipid_mask == slave_info->sensor_id2)
+				return rc;
+		}
 		pr_err("%s chip id %x does not match %x\n",
 				__func__, chipid, slave_info->sensor_id);
 		return -ENODEV;
@@ -1447,9 +1476,7 @@ static struct msm_camera_i2c_fn_t msm_sensor_qup_func_tbl = {
 
 int32_t msm_sensor_init_default_params(struct msm_sensor_ctrl_t *s_ctrl)
 {
-	int32_t                       rc = -ENOMEM;
 	struct msm_camera_cci_client *cci_client = NULL;
-	struct msm_cam_clk_info      *clk_info = NULL;
 	unsigned long mount_pos = 0;
 
 	/* Validate input parameters */
@@ -1500,19 +1527,6 @@ int32_t msm_sensor_init_default_params(struct msm_sensor_ctrl_t *s_ctrl)
 	if (!s_ctrl->sensor_v4l2_subdev_ops)
 		s_ctrl->sensor_v4l2_subdev_ops = &msm_sensor_subdev_ops;
 
-	/* Initialize clock info */
-	clk_info = kzalloc(sizeof(cam_8974_clk_info), GFP_KERNEL);
-	if (!clk_info) {
-		pr_err("%s:%d failed no memory clk_info %pK\n", __func__,
-			__LINE__, clk_info);
-		rc = -ENOMEM;
-		goto FREE_CCI_CLIENT;
-	}
-	memcpy(clk_info, cam_8974_clk_info, sizeof(cam_8974_clk_info));
-	s_ctrl->sensordata->power_info.clk_info = clk_info;
-	s_ctrl->sensordata->power_info.clk_info_size =
-		ARRAY_SIZE(cam_8974_clk_info);
-
 	/* Update sensor mount angle and position in media entity flag */
 	mount_pos = s_ctrl->sensordata->sensor_info->position << 16;
 	mount_pos = mount_pos | ((s_ctrl->sensordata->sensor_info->
@@ -1520,8 +1534,4 @@ int32_t msm_sensor_init_default_params(struct msm_sensor_ctrl_t *s_ctrl)
 	s_ctrl->msm_sd.sd.entity.flags = mount_pos | MEDIA_ENT_FL_DEFAULT;
 
 	return 0;
-
-FREE_CCI_CLIENT:
-	kfree(cci_client);
-	return rc;
 }

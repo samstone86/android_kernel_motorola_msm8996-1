@@ -221,6 +221,10 @@ static int disable_slots;
 /* root can write, others read */
 module_param(disable_slots, int, S_IRUGO|S_IWUSR);
 
+#if defined(CONFIG_MMC_SDHCI_MSM_DEBUG)
+static struct dentry *debugfs_dir;
+#endif
+
 enum vdd_io_level {
 	/* set vdd_io_data->low_vol_level */
 	VDD_IO_LOW,
@@ -966,6 +970,13 @@ int sdhci_msm_execute_tuning(struct sdhci_host *host, u32 opcode)
 		(ios.timing == MMC_TIMING_UHS_SDR104)))
 		return 0;
 
+	/*
+	 * Don't allow re-tuning for CRC errors observed for any commands
+	 * that are sent during tuning sequence itself.
+	 */
+	if (msm_host->tuning_in_progress)
+		return 0;
+	msm_host->tuning_in_progress = true;
 	pr_debug("%s: Enter %s\n", mmc_hostname(mmc), __func__);
 
 	/* CDC/SDC4 DLL HW calibration is only required for HS400 mode*/
@@ -1106,7 +1117,8 @@ retry:
 
 	/* reset drive type to default (50 ohm) if changed */
 	if (drv_type_changed)
-		sdhci_msm_set_mmc_drv_type(host, opcode, 0);
+		sdhci_msm_set_mmc_drv_type(host, opcode,
+					card->ext_csd.drv_type);
 
 	if (tuned_phase_cnt) {
 		rc = msm_find_most_appropriate_phase(host, tuned_phases,
@@ -1142,6 +1154,7 @@ out:
 	if (!rc)
 		msm_host->tuning_done = true;
 	spin_unlock_irqrestore(&host->lock, flags);
+	msm_host->tuning_in_progress = false;
 	pr_debug("%s: Exit %s, err(%d)\n", mmc_hostname(mmc), __func__, rc);
 	return rc;
 }
@@ -1616,6 +1629,7 @@ struct sdhci_msm_pltfm_data *sdhci_msm_populate_pdata(struct device *dev,
 	struct sdhci_msm_pltfm_data *pdata = NULL;
 	struct device_node *np = dev->of_node;
 	u32 bus_width = 0;
+	u32 drv_types = MMC_DRIVER_TYPE_0;
 	int len, i;
 	int clk_table_len;
 	u32 *clk_table = NULL;
@@ -1633,6 +1647,9 @@ struct sdhci_msm_pltfm_data *sdhci_msm_populate_pdata(struct device *dev,
 	pdata->status_gpio = of_get_named_gpio_flags(np, "cd-gpios", 0, &flags);
 	if (gpio_is_valid(pdata->status_gpio) & !(flags & OF_GPIO_ACTIVE_LOW))
 		pdata->caps2 |= MMC_CAP2_CD_ACTIVE_HIGH;
+
+	if (of_get_property(np, "qcom,cd-wakeup", NULL))
+		msm_host->mmc->slot.cd_wakeup = true;
 
 	of_property_read_u32(np, "qcom,bus-width", &bus_width);
 	if (bus_width == 8)
@@ -1664,6 +1681,24 @@ struct sdhci_msm_pltfm_data *sdhci_msm_populate_pdata(struct device *dev,
 		if (!strcmp(lower_bus_speed, "DDR52"))
 			msm_host->mmc->clk_scaling.lower_bus_speed_mode |=
 				MMC_SCALING_LOWER_DDR52_MODE;
+	}
+
+	/* set default type for pdata->drv_types */
+	pdata->drv_types = MMC_DRIVER_TYPE_0;
+
+	of_property_read_u32(np, "qcom,drv-types", &drv_types);
+	if (drv_types) {
+		if (drv_types & MMC_DRIVER_TYPE_1)
+			pdata->caps |= MMC_CAP_DRIVER_TYPE_A;
+		if (drv_types & MMC_DRIVER_TYPE_2)
+			pdata->caps |= MMC_CAP_DRIVER_TYPE_C;
+		if (drv_types & MMC_DRIVER_TYPE_3)
+			pdata->caps |= MMC_CAP_DRIVER_TYPE_D;
+		if (drv_types & MMC_DRIVER_TYPE_4)
+			pdata->caps2 |= MMC_CAP2_DRIVER_TYPE_4;
+
+		/* More caps bits may be set by sdhci, so don't forget. */
+		pdata->drv_types = drv_types;
 	}
 
 	if (sdhci_msm_dt_get_array(dev, "qcom,clk-rates",
@@ -3684,6 +3719,97 @@ static void sdhci_msm_post_req(struct sdhci_host *host,
 			msm_host->pm_qos_prev_cpu = -1;
 }
 
+static int sdhci_msm_select_drive_strength(struct sdhci_host *host,
+		int host_drv, int card_drv)
+{
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct sdhci_msm_host *msm_host = pltfm_host->priv;
+	int drv_type = msm_host->pdata->drv_types & host_drv & card_drv;
+
+	pr_debug("%s: %s plat=0x%02X, host=0x%02X, card=0x%02X\n",
+			mmc_hostname(host->mmc), __func__,
+			msm_host->pdata->drv_types, host_drv, card_drv);
+	/* Choose the lowest drive strength that everyone can agree on. */
+	if (drv_type & SD_DRIVER_TYPE_D)
+		return MMC_SET_DRIVER_TYPE_D;   /* 100 ohms */
+	if (drv_type & SD_DRIVER_TYPE_C)
+		return MMC_SET_DRIVER_TYPE_C;   /* 66 ohms */
+	if (drv_type & SD_DRIVER_TYPE_B)
+		return MMC_SET_DRIVER_TYPE_B;   /* 50 ohms */
+	if (drv_type & MMC_DRIVER_TYPE_4)
+		return MMC_SET_DRIVER_TYPE_4;   /* 40 ohms */
+	if (drv_type & SD_DRIVER_TYPE_A)
+		return MMC_SET_DRIVER_TYPE_A;   /* 33 ohms */
+
+	/* No agreement, so return the default (50 ohms). */
+	return MMC_SET_DRIVER_TYPE_B;
+}
+
+#if defined(CONFIG_MMC_SDHCI_MSM_DEBUG)
+static int sdhci_msm_debugfs_drv_types_get(void *data, u64 *val)
+{
+	struct sdhci_msm_pltfm_data *pdata = data;
+
+	*val = pdata->drv_types;
+
+	return 0;
+}
+
+static int sdhci_msm_debugfs_drv_types_set(void *data, u64 val)
+{
+	struct sdhci_msm_pltfm_data *pdata = data;
+
+	pdata->drv_types = val;
+
+	return 0;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(sdhci_msm_debugfs_drv_types_ops,
+		sdhci_msm_debugfs_drv_types_get,
+		sdhci_msm_debugfs_drv_types_set,
+		"0x%llX\n");
+
+static void sdhci_msm_debugfs_init(struct sdhci_msm_host *msm_host)
+{
+	if (!debugfs_dir)
+		debugfs_dir = debugfs_create_dir("sdhci_msm", 0);
+
+	if (IS_ERR(debugfs_dir)) {
+		dev_err(&msm_host->pdev->dev, "failed to create debugfs root\n");
+		return;
+	}
+
+	msm_host->debugfs_host_dir = debugfs_create_dir(
+			mmc_hostname(msm_host->mmc), debugfs_dir);
+	if (IS_ERR(msm_host->debugfs_host_dir)) {
+		dev_err(&msm_host->pdev->dev,
+				"failed to create debugfs host dir (%ld)\n",
+				PTR_ERR(msm_host->debugfs_host_dir));
+		msm_host->debugfs_host_dir = NULL;
+		return;
+	}
+
+	msm_host->debugfs_drv_types = debugfs_create_file("drv_types",
+			S_IRUSR, msm_host->debugfs_host_dir,
+			msm_host->pdata, &sdhci_msm_debugfs_drv_types_ops);
+	if (IS_ERR(msm_host->debugfs_drv_types)) {
+		dev_err(&msm_host->pdev->dev,
+				"failed to create a debugfs drv_types entry (%ld)\n",
+				PTR_ERR(msm_host->debugfs_drv_types));
+		msm_host->debugfs_drv_types = NULL;
+	}
+}
+
+static void sdhci_msm_debugfs_remove(struct sdhci_msm_host *msm_host)
+{
+	debugfs_remove_recursive(msm_host->debugfs_host_dir);
+	msm_host->debugfs_host_dir = NULL;
+}
+#else
+static void sdhci_msm_debugfs_init(struct sdhci_msm_host *msm_host) {}
+static void sdhci_msm_debugfs_remove(struct sdhci_msm_host *msm_host) {}
+#endif
+
 static void sdhci_msm_init(struct sdhci_host *host)
 {
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
@@ -3709,6 +3835,7 @@ static struct sdhci_ops sdhci_msm_ops = {
 	.set_clock = sdhci_msm_set_clock,
 	.get_min_clock = sdhci_msm_get_min_clock,
 	.get_max_clock = sdhci_msm_get_max_clock,
+	.select_drive_strength = sdhci_msm_select_drive_strength,
 	.dump_vendor_regs = sdhci_msm_dump_vendor_regs,
 	.config_auto_tuning_cmd = sdhci_msm_config_auto_tuning_cmd,
 	.enable_controller_clock = sdhci_msm_enable_controller_clock,
@@ -3945,10 +4072,8 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 			goto pltfm_free;
 		}
 
-		if (ret <= 2) {
+		if (ret <= 2)
 			sdhci_slot[ret-1] = msm_host;
-			host->slot_no = ret;
-		}
 
 		msm_host->pdata = sdhci_msm_populate_pdata(&pdev->dev,
 							   msm_host);
@@ -4149,6 +4274,8 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	host->quirks2 |= SDHCI_QUIRK2_IGNORE_DATATOUT_FOR_R1BCMD;
 	host->quirks2 |= SDHCI_QUIRK2_BROKEN_PRESET_VALUE;
 	host->quirks2 |= SDHCI_QUIRK2_USE_RESERVED_MAX_TIMEOUT;
+	host->quirks2 |= SDHCI_QUIRK2_NON_STANDARD_TUNING;
+	host->quirks2 |= SDHCI_QUIRK2_USE_PIO_FOR_EMMC_TUNING;
 
 	if (host->quirks2 & SDHCI_QUIRK2_ALWAYS_USE_BASE_CLOCK)
 		host->quirks2 |= SDHCI_QUIRK2_DIVIDE_TOUT_BY_4;
@@ -4203,7 +4330,6 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	msm_host->mmc->caps |= MMC_CAP_WAIT_WHILE_BUSY;
 	msm_host->mmc->caps2 |= msm_host->pdata->caps2;
 	msm_host->mmc->caps2 |= MMC_CAP2_BOOTPART_NOACC;
-	msm_host->mmc->caps2 |= MMC_CAP2_FULL_PWR_CYCLE;
 	msm_host->mmc->caps2 |= MMC_CAP2_HS400_POST_TUNING;
 	msm_host->mmc->caps2 |= MMC_CAP2_CLK_SCALE;
 	msm_host->mmc->caps2 |= MMC_CAP2_SANITIZE;
@@ -4338,6 +4464,9 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 		       mmc_hostname(host->mmc), __func__, ret);
 		device_remove_file(&pdev->dev, &msm_host->auto_cmd21_attr);
 	}
+
+	sdhci_msm_debugfs_init(msm_host);
+
 	/* Successful initialization */
 	goto out;
 
@@ -4388,6 +4517,8 @@ static int sdhci_msm_remove(struct platform_device *pdev)
 	struct sdhci_msm_pltfm_data *pdata = msm_host->pdata;
 	int dead = (readl_relaxed(host->ioaddr + SDHCI_INT_STATUS) ==
 			0xffffffff);
+
+	sdhci_msm_debugfs_remove(msm_host);
 
 	pr_debug("%s: %s\n", dev_name(&pdev->dev), __func__);
 	if (!gpio_is_valid(msm_host->pdata->status_gpio))
@@ -4542,9 +4673,11 @@ static int sdhci_msm_suspend(struct device *dev)
 	ktime_t start = ktime_get();
 
 	if (gpio_is_valid(msm_host->pdata->status_gpio) &&
-		(msm_host->mmc->slot.cd_irq >= 0))
-			disable_irq(msm_host->mmc->slot.cd_irq);
-
+			(msm_host->mmc->slot.cd_irq >= 0)) {
+		disable_irq(msm_host->mmc->slot.cd_irq);
+		if (msm_host->mmc->slot.cd_wakeup)
+			enable_irq_wake(msm_host->mmc->slot.cd_irq);
+	}
 	if (pm_runtime_suspended(dev)) {
 		pr_debug("%s: %s: already runtime suspended\n",
 		mmc_hostname(host->mmc), __func__);
@@ -4574,8 +4707,11 @@ static int sdhci_msm_resume(struct device *dev)
 	ktime_t start = ktime_get();
 
 	if (gpio_is_valid(msm_host->pdata->status_gpio) &&
-		(msm_host->mmc->slot.cd_irq >= 0))
-			enable_irq(msm_host->mmc->slot.cd_irq);
+			(msm_host->mmc->slot.cd_irq >= 0)) {
+		enable_irq(msm_host->mmc->slot.cd_irq);
+		if (msm_host->mmc->slot.cd_wakeup)
+			disable_irq_wake(msm_host->mmc->slot.cd_irq);
+	}
 
 	if (pm_runtime_suspended(dev)) {
 		pr_debug("%s: %s: runtime suspended, defer system resume\n",

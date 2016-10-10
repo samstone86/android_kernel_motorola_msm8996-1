@@ -29,6 +29,8 @@
 #include <linux/spinlock.h>
 #include <linux/reboot.h>
 #include <linux/irqchip/msm-mpm-irq.h>
+#include <linux/syscore_ops.h>
+#include <linux/wakeup_reason.h>
 #include "../core.h"
 #include "../pinconf.h"
 #include "pinctrl-msm.h"
@@ -70,6 +72,25 @@ struct msm_pinctrl {
 	const struct msm_pinctrl_soc_data *soc;
 	void __iomem *regs;
 };
+
+static struct msm_pinctrl msm_pctrl;
+
+static inline u32 paranoid_readl(const void __iomem *addr)
+{
+	u32 val = readl_relaxed(addr);
+#ifdef CONFIG_PINCTRL_PARANOID
+	u32 val2 = readl_relaxed(addr);
+
+	while (val != val2) {
+		pr_err("pinctrl: %p read as %X and %X\n", addr, val, val2);
+		val = val2;
+		val2 = readl_relaxed(addr);
+		pr_err("pinctrl: %p reread as %x\n", addr, val2);
+	}
+#endif
+	rmb();
+	return val;
+}
 
 static inline struct msm_pinctrl *to_msm_pinctrl(struct gpio_chip *gc)
 {
@@ -160,7 +181,7 @@ static int msm_pinmux_set_mux(struct pinctrl_dev *pctldev,
 
 	spin_lock_irqsave(&pctrl->lock, flags);
 
-	val = readl(pctrl->regs + g->ctl_reg);
+	val = paranoid_readl(pctrl->regs + g->ctl_reg);
 	val &= ~(0x7 << g->mux_bit);
 	val |= i << g->mux_bit;
 	writel(val, pctrl->regs + g->ctl_reg);
@@ -252,7 +273,7 @@ static int msm_config_group_get(struct pinctrl_dev *pctldev,
 	if (ret < 0)
 		return ret;
 
-	val = readl(pctrl->regs + g->ctl_reg);
+	val = paranoid_readl(pctrl->regs + g->ctl_reg);
 	arg = (val >> bit) & mask;
 
 	/* Convert register value to pinconf value */
@@ -375,7 +396,7 @@ static int msm_config_group_set(struct pinctrl_dev *pctldev,
 		}
 
 		spin_lock_irqsave(&pctrl->lock, flags);
-		val = readl(pctrl->regs + g->ctl_reg);
+		val = paranoid_readl(pctrl->regs + g->ctl_reg);
 		val &= ~(mask << bit);
 		val |= arg << bit;
 		writel(val, pctrl->regs + g->ctl_reg);
@@ -410,7 +431,7 @@ static int msm_gpio_direction_input(struct gpio_chip *chip, unsigned offset)
 
 	spin_lock_irqsave(&pctrl->lock, flags);
 
-	val = readl(pctrl->regs + g->ctl_reg);
+	val = paranoid_readl(pctrl->regs + g->ctl_reg);
 	val &= ~BIT(g->oe_bit);
 	writel(val, pctrl->regs + g->ctl_reg);
 
@@ -437,7 +458,7 @@ static int msm_gpio_direction_output(struct gpio_chip *chip, unsigned offset, in
 		val &= ~BIT(g->out_bit);
 	writel(val, pctrl->regs + g->io_reg);
 
-	val = readl(pctrl->regs + g->ctl_reg);
+	val = paranoid_readl(pctrl->regs + g->ctl_reg);
 	val |= BIT(g->oe_bit);
 	writel(val, pctrl->regs + g->ctl_reg);
 
@@ -515,8 +536,13 @@ static void msm_gpio_dbg_show_one(struct seq_file *s,
 		"pull up"
 	};
 
+	if (!gpiochip_is_requested(chip, offset)) {
+		seq_printf(s, " gpio%d: is not allocated in gpiolib", offset);
+		return;
+	}
+
 	g = &pctrl->soc->groups[offset];
-	ctl_reg = readl(pctrl->regs + g->ctl_reg);
+	ctl_reg = paranoid_readl(pctrl->regs + g->ctl_reg);
 
 	is_out = !!(ctl_reg & BIT(g->oe_bit));
 	func = (ctl_reg >> g->mux_bit) & 7;
@@ -584,7 +610,7 @@ static void msm_gpio_update_dual_edge_pos(struct msm_pinctrl *pctrl,
 	do {
 		val = readl(pctrl->regs + g->io_reg) & BIT(g->in_bit);
 
-		pol = readl(pctrl->regs + g->intr_cfg_reg);
+		pol = paranoid_readl(pctrl->regs + g->intr_cfg_reg);
 		pol ^= BIT(g->intr_polarity_bit);
 		writel(pol, pctrl->regs + g->intr_cfg_reg);
 
@@ -609,7 +635,7 @@ static void msm_gpio_irq_mask(struct irq_data *d)
 
 	spin_lock_irqsave(&pctrl->lock, flags);
 
-	val = readl(pctrl->regs + g->intr_cfg_reg);
+	val = paranoid_readl(pctrl->regs + g->intr_cfg_reg);
 	val &= ~BIT(g->intr_enable_bit);
 	writel(val, pctrl->regs + g->intr_cfg_reg);
 
@@ -636,7 +662,7 @@ static void msm_gpio_irq_unmask(struct irq_data *d)
 	val &= ~BIT(g->intr_status_bit);
 	writel(val, pctrl->regs + g->intr_status_reg);
 
-	val = readl(pctrl->regs + g->intr_cfg_reg);
+	val = paranoid_readl(pctrl->regs + g->intr_cfg_reg);
 	val |= BIT(g->intr_enable_bit);
 	writel(val, pctrl->regs + g->intr_cfg_reg);
 
@@ -693,7 +719,7 @@ static int msm_gpio_irq_set_type(struct irq_data *d, unsigned int type)
 		clear_bit(d->hwirq, pctrl->dual_edge_irqs);
 
 	/* Route interrupts to application cpu */
-	val = readl(pctrl->regs + g->intr_target_reg);
+	val = paranoid_readl(pctrl->regs + g->intr_target_reg);
 	val &= ~(7 << g->intr_target_bit);
 	val |= g->intr_target_kpss_val << g->intr_target_bit;
 	writel(val, pctrl->regs + g->intr_target_reg);
@@ -703,7 +729,7 @@ static int msm_gpio_irq_set_type(struct irq_data *d, unsigned int type)
 	 * internal circuitry of TLMM, toggling the RAW_STATUS
 	 * could cause the INTR_STATUS to be set for EDGE interrupts.
 	 */
-	val = readl(pctrl->regs + g->intr_cfg_reg);
+	val = paranoid_readl(pctrl->regs + g->intr_cfg_reg);
 	val |= BIT(g->intr_raw_status_bit);
 	if (g->intr_detection_width == 2) {
 		val &= ~(3 << g->intr_detection_bit);
@@ -928,6 +954,45 @@ static void msm_pinctrl_ebi2_emmc_enable(struct msm_pinctrl *pctrl,
 	writel_relaxed(val, pctrl->regs + TLMM_EBI2_EMMC_GPIO_CFG);
 }
 
+static int msm_pinctrl_suspend(void)
+{
+	return 0;
+}
+
+static void msm_pinctrl_resume(void)
+{
+	int i, irq_pin;
+	u32 val;
+	const struct msm_pingroup *g;
+	struct msm_pinctrl *pctrl = &msm_pctrl;
+
+	for_each_set_bit(i, pctrl->enabled_irqs, pctrl->chip.ngpio) {
+		struct irq_desc *desc = NULL;
+		const char *name = "null";
+
+		g = &pctrl->soc->groups[i];
+		val = readl_relaxed(pctrl->regs + g->intr_status_reg);
+		if (val & BIT(g->intr_status_bit)) {
+			irq_pin = irq_find_mapping(pctrl->chip.irqdomain, i);
+			desc = irq_to_desc(irq_pin);
+
+			if (desc == NULL)
+				name = "stray irq";
+			else if (desc->action && desc->action->name)
+				name = desc->action->name;
+			else if (desc->name)
+				name = desc->name;
+
+			log_wakeup_reason(irq_pin);
+		}
+	}
+}
+
+static struct syscore_ops pinctrl_syscore_ops = {
+	.suspend = msm_pinctrl_suspend,
+	.resume  = msm_pinctrl_resume,
+};
+
 int msm_pinctrl_probe(struct platform_device *pdev,
 		      const struct msm_pinctrl_soc_data *soc_data)
 {
@@ -936,11 +1001,7 @@ int msm_pinctrl_probe(struct platform_device *pdev,
 	int ret;
 	u32 tlmm_emmc_boot_select;
 
-	pctrl = devm_kzalloc(&pdev->dev, sizeof(*pctrl), GFP_KERNEL);
-	if (!pctrl) {
-		dev_err(&pdev->dev, "Can't allocate msm_pinctrl\n");
-		return -ENOMEM;
-	}
+	pctrl = &msm_pctrl;
 	pctrl->dev = &pdev->dev;
 	pctrl->soc = soc_data;
 	pctrl->chip = msm_gpio_template;
@@ -981,6 +1042,8 @@ int msm_pinctrl_probe(struct platform_device *pdev,
 	}
 	pctrl->irq_chip_extn = &mpm_pinctrl_extn;
 	platform_set_drvdata(pdev, pctrl);
+
+	register_syscore_ops(&pinctrl_syscore_ops);
 
 	dev_dbg(&pdev->dev, "Probed Qualcomm pinctrl driver\n");
 

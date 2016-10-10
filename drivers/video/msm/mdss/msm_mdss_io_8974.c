@@ -1203,6 +1203,115 @@ void mdss_dsi_core_clk_deinit(struct device *dev, struct dsi_shared_data *sdata)
 		devm_clk_put(dev, sdata->mdp_core_clk);
 }
 
+/* To have a match of calculation of the DSI MIPI clock between DSI
+ * and downstream device such as ANX7805, the left/right/top/down
+ * borders must be included in h_active and v_active.
+ *   h_active = xres + border_left + border_right
+ *   v_active = yres + border_top + border_bottom
+ * Since Linux FB doesn't support left/right/top/down borders and
+ * if these values are set, then it will cause big problem because
+ * DSI and downstream devices will have different MIPI Frequencies
+ * Normal, these are usually set to 0, and to avoid a future headache
+ * these values will be zero out and warning message will be printed
+ */
+void mdss_dsi_border_check(struct mdss_panel_data *pdata)
+{
+#ifdef CONFIG_SLIMPORT_ANX7805
+	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
+	struct mdss_panel_info *pinfo = NULL;
+
+	if (!pdata) {
+		pr_err("%s: invalid panel data\n", __func__);
+		return;
+	}
+
+	pr_debug("%s+\n", __func__);
+
+	ctrl_pdata = container_of(pdata, struct mdss_dsi_ctrl_pdata,
+							panel_data);
+	pinfo = &pdata->panel_info;
+
+	/* anx7805 is using DSI1 */
+	if (ctrl_pdata->ndx == 0)
+		return;
+
+	if (pinfo->lcdc.border_left || pinfo->lcdc.border_right ||
+		pinfo->lcdc.border_top || pinfo->lcdc.border_bottom) {
+		pr_warn("%s: invalid border_left=%d border_right=%d border_top=%d border_bottom=%d\n",
+			__func__,
+			pinfo->lcdc.border_left, pinfo->lcdc.border_right,
+			pinfo->lcdc.border_top, pinfo->lcdc.border_bottom);
+		pr_warn("%s: these values will set to zero\n", __func__);
+
+		pinfo->lcdc.border_left = 0;
+		pinfo->lcdc.border_right = 0;
+		pinfo->lcdc.border_top = 0;
+		pinfo->lcdc.border_bottom = 0;
+	}
+#endif
+}
+
+/*
+ * The ANX7805 driver has problem to run at low MIPI Freq that will
+ * cause the scrolling the image. To work around this issue, if the screen
+ * resolution is 720p (720x1280) or higher then it will use 4 MIPI data lanes.
+ * This API will calculate the MIPI data rate per lane based on using 4 data
+ * lanes by:
+ *      ((xres+hfp+hbp+hpw) * (yres+vfp+vbp+vpw) * 60fps * 24bitpp)
+ *       ----------------------------------------------------------
+ *              4_datalanes * 2_DDR
+ * with 720p the mipi_ddr_clk_4lanes will be 222750000, therefore
+ * using max_mipi_ddr_clk_4lanes = 200000000 to determine if the screen
+ * resolution is 720p or higher and configure to use 4 data lanes.
+ * TODO: If the disp_config has the number_lanes information then this need
+ * to add a logic to use what it has in the disp_config
+ */
+void mdss_dsi_mipi_lane_select(struct mdss_panel_data *pdata)
+{
+#ifdef CONFIG_SLIMPORT_ANX7805
+	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
+	struct mdss_panel_info *pinfo = NULL;
+	u32 pixel_total, mipi_ddr_clk_4lanes;
+	u64 total_data_rate;
+	const u32 max_mipi_ddr_clk_4lanes = 200000000;
+
+	pr_debug("%s+\n", __func__);
+	ctrl_pdata = container_of(pdata, struct mdss_dsi_ctrl_pdata,
+						panel_data);
+	pinfo = &pdata->panel_info;
+
+	/* anx7805 is using DSI1 */
+	if (ctrl_pdata->ndx == 0)
+		return;
+
+	pixel_total = (pinfo->lcdc.h_back_porch + pinfo->lcdc.h_front_porch +
+			pinfo->lcdc.h_pulse_width + pinfo->xres) *
+			(pinfo->lcdc.v_back_porch + pinfo->lcdc.v_front_porch +
+				pinfo->lcdc.v_pulse_width + pinfo->yres);
+	total_data_rate = (u64)pixel_total * 60 * 24;
+	mipi_ddr_clk_4lanes = (u32)(total_data_rate / 4) / 2;
+
+	if (mipi_ddr_clk_4lanes > max_mipi_ddr_clk_4lanes) {
+		if (!pinfo->mipi.data_lane2 || !pinfo->mipi.data_lane3) {
+			pinfo->mipi.data_lane0 = 1;
+			pinfo->mipi.data_lane1 = 1;
+			pinfo->mipi.data_lane2 = 1;
+			pinfo->mipi.data_lane3 = 1;
+			pr_warn("%s: pixel_total= %d total_data_rate=%llu mipi_ddr_clk_4lanes=%d max_mipi_ddr_clk_4lanes=%d\n",
+				__func__, pixel_total, total_data_rate,
+				mipi_ddr_clk_4lanes, max_mipi_ddr_clk_4lanes);
+
+			pr_warn("%s: forced to use 4 MIPI data lanes. mipi_ddr_clk_4lanes = %d\n",
+				__func__, mipi_ddr_clk_4lanes);
+		}
+	} else {
+		/* change back to 2 data lanes for screen resolution < 720p */
+		pinfo->mipi.data_lane2 = 0;
+		pinfo->mipi.data_lane3 = 0;
+	}
+#endif
+}
+
 int mdss_dsi_clk_refresh(struct mdss_panel_data *pdata, bool update_phy)
 {
 	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
@@ -1214,6 +1323,7 @@ int mdss_dsi_clk_refresh(struct mdss_panel_data *pdata, bool update_phy)
 		return -EINVAL;
 	}
 
+	pr_debug("%s+\n", __func__);
 	ctrl_pdata = container_of(pdata, struct mdss_dsi_ctrl_pdata,
 							panel_data);
 	pinfo = &pdata->panel_info;
@@ -1222,6 +1332,9 @@ int mdss_dsi_clk_refresh(struct mdss_panel_data *pdata, bool update_phy)
 		pr_err("%s: invalid ctrl data\n", __func__);
 		return -EINVAL;
 	}
+
+	mdss_dsi_border_check(pdata);
+	mdss_dsi_mipi_lane_select(pdata);
 
 	if (update_phy) {
 		pinfo->mipi.frame_rate = mdss_panel_calc_frame_rate(pinfo);
@@ -1269,6 +1382,7 @@ int mdss_dsi_clk_refresh(struct mdss_panel_data *pdata, bool update_phy)
 			pr_err("Error in calculating phy timings\n");
 			return rc;
 		}
+		ctrl_pdata->update_phy_timing = false;
 	}
 
 	return rc;
@@ -2090,7 +2204,7 @@ int mdss_dsi_pre_clkoff_cb(void *priv,
 		 * However, when blanking the panel, we should enter ULPS
 		 * only if ULPS during suspend feature is enabled.
 		 */
-		if (!(ctrl->ctrl_state & CTRL_STATE_DSI_ACTIVE)) {
+		if (!(ctrl->ctrl_state & CTRL_STATE_PANEL_INIT)) {
 			if (pdata->panel_info.ulps_suspend_enabled)
 				mdss_dsi_ulps_config(ctrl, 1);
 		} else if (mdss_dsi_ulps_feature_enabled(pdata)) {
@@ -2301,6 +2415,10 @@ int mdss_dsi_pre_clkon_cb(void *priv,
 
 		}
 	}
+
+	/* Disable dynamic clock gating*/
+	if (ctrl->mdss_util->dyn_clk_gating_ctrl)
+		ctrl->mdss_util->dyn_clk_gating_ctrl(0);
 
 	return rc;
 }

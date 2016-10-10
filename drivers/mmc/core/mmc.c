@@ -454,8 +454,6 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 	card->ext_csd.raw_card_type = ext_csd[EXT_CSD_CARD_TYPE];
 	mmc_select_card_type(card);
 
-	card->ext_csd.raw_drive_strength = ext_csd[EXT_CSD_DRIVE_STRENGTH];
-
 	card->ext_csd.raw_s_a_timeout = ext_csd[EXT_CSD_S_A_TIMEOUT];
 	card->ext_csd.raw_erase_timeout_mult =
 		ext_csd[EXT_CSD_ERASE_TIMEOUT_MULT];
@@ -597,6 +595,19 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 		card->ext_csd.rst_n_function = ext_csd[EXT_CSD_RST_N_FUNCTION];
 
 		/*
+		 * Some eMMC vendors violate eMMC 5.0 spec and set
+		 * REL_WR_SEC_C register to 0x10 to indicate the
+		 * ability of RPMB throughput improvement thus lead
+		 * to failure when TZ module write data to RPMB
+		 * partition. So check bit[4] of EXT_CSD[166] and
+		 * if it is not set then change value of REL_WR_SEC_C
+		 * to 0x1 directly ignoring value of EXT_CSD[222].
+		 */
+		if (!(card->ext_csd.rel_param &
+					EXT_CSD_WR_REL_PARAM_EN_RPMB_REL_WR))
+			card->ext_csd.rel_sectors = 0x1;
+
+		/*
 		 * RPMB regions are defined in multiples of 128K.
 		 */
 		card->ext_csd.raw_rpmb_size_mult = ext_csd[EXT_CSD_RPMB_MULT];
@@ -647,6 +658,8 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 			ext_csd[EXT_CSD_MAX_PACKED_WRITES];
 		card->ext_csd.max_packed_reads =
 			ext_csd[EXT_CSD_MAX_PACKED_READS];
+		card->ext_csd.raw_drive_strength =
+			ext_csd[EXT_CSD_DRIVE_STRENGTH];
 	} else {
 		card->ext_csd.data_sector_size = 512;
 	}
@@ -684,6 +697,12 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 		card->ext_csd.enhanced_rpmb_supported =
 			(card->ext_csd.rel_param &
 			 EXT_CSD_WR_REL_PARAM_EN_RPMB_REL_WR);
+
+		card->ext_csd.ffu_capable =
+			((ext_csd[EXT_CSD_SUPPORTED_MODE] & 0x1) == 0x1) &&
+			((ext_csd[EXT_CSD_FW_CONFIG] & 0x1) == 0x0);
+		card->ext_csd.ffu_mode_op = ext_csd[EXT_CSD_FFU_FEATURES];
+
 	} else {
 		card->ext_csd.cmdq_support = 0;
 		card->ext_csd.cmdq_depth = 0;
@@ -799,6 +818,7 @@ MMC_DEV_ATTR(raw_rpmb_size_mult, "%#x\n", card->ext_csd.raw_rpmb_size_mult);
 MMC_DEV_ATTR(enhanced_rpmb_supported, "%#x\n",
 		card->ext_csd.enhanced_rpmb_supported);
 MMC_DEV_ATTR(rel_sectors, "%#x\n", card->ext_csd.rel_sectors);
+MMC_DEV_ATTR(firmware_version, "0x%08x\n", card->ext_csd.fw_version);
 
 static struct attribute *mmc_std_attrs[] = {
 	&dev_attr_cid.attr,
@@ -818,6 +838,7 @@ static struct attribute *mmc_std_attrs[] = {
 	&dev_attr_raw_rpmb_size_mult.attr,
 	&dev_attr_enhanced_rpmb_supported.attr,
 	&dev_attr_rel_sectors.attr,
+	&dev_attr_firmware_version.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(mmc_std);
@@ -1041,6 +1062,73 @@ static int mmc_select_hs(struct mmc_card *card)
 }
 
 /*
+ * eMMC v4.5 added 4 driver strengths for HS200, matching those for UHS-I in
+ * the SD v3.0 specification.  Functionally, eMMC and SD driver types map as:
+ *
+ *   SD   eMMC   Impedance   Relative Drive
+ *   A    1      33 ohms     x1.5
+ *   B    0      50 ohms     x1    (default)
+ *   C    2      66 ohms     x0.75
+ *   D    3      100 ohms    x0.5
+ *
+ * eMMC v5.0 spec adds one additional type for which there is no corresponding
+ * SD type:
+ *
+ *   Type 4 - 40 ohms, x1.2
+ */
+static int mmc_select_driver_type(struct mmc_card *card)
+{
+	int host_drv_type = MMC_DRIVER_TYPE_0;
+	int card_drv_type = MMC_DRIVER_TYPE_0;
+	int drv_type;
+
+	/*
+	 * We reuse the SD-derived capability bits here.  If the host doesn't
+	 * support any of the Driver Types 1, 2 or 3, or there is no board
+	 * specific handler then default Driver Type 0 is used.
+	 */
+	if (!(card->host->caps & (MMC_CAP_DRIVER_TYPE_A | MMC_CAP_DRIVER_TYPE_C
+					| MMC_CAP_DRIVER_TYPE_D)) &&
+			!(card->host->caps2 & MMC_CAP2_DRIVER_TYPE_4))
+		return 0;
+
+	if (!card->host->ops->select_drive_strength)
+		return 0;
+
+	if (card->host->caps & MMC_CAP_DRIVER_TYPE_A)
+		host_drv_type |= MMC_DRIVER_TYPE_1;
+
+	if (card->host->caps & MMC_CAP_DRIVER_TYPE_C)
+		host_drv_type |= MMC_DRIVER_TYPE_2;
+
+	if (card->host->caps & MMC_CAP_DRIVER_TYPE_D)
+		host_drv_type |= MMC_DRIVER_TYPE_3;
+
+	if (card->host->caps2 & MMC_CAP2_DRIVER_TYPE_4)
+		host_drv_type |= MMC_DRIVER_TYPE_4;
+
+	card_drv_type |= card->ext_csd.raw_drive_strength &
+		(MMC_DRIVER_TYPE_1 | MMC_DRIVER_TYPE_2 |
+		 MMC_DRIVER_TYPE_3 | MMC_DRIVER_TYPE_4);
+
+	/*
+	 * Card drive strength depends on the board design.  Let the host
+	 * driver decide what driver strength is best, based on all of the
+	 * constraints.
+	 */
+	mmc_host_clk_hold(card->host);
+	drv_type = card->host->ops->select_drive_strength(card->host,
+			host_drv_type, card_drv_type);
+	mmc_host_clk_release(card->host);
+
+	pr_debug("%s: %s: %d\n", mmc_hostname(card->host), __func__, drv_type);
+	/* We send the driver type as part of the HS_TIMING command. */
+	card->ext_csd.drv_type = drv_type;
+
+	return 0;
+}
+
+/*
  * Activate wide bus and DDR if supported.
  */
 static int mmc_select_hs_ddr(struct mmc_card *card)
@@ -1236,6 +1324,10 @@ static int mmc_select_hs200(struct mmc_card *card)
 	 * switch to HS200 mode if bus width is set successfully.
 	 */
 	err = mmc_select_bus_width(card);
+
+	if (!IS_ERR_VALUE(err))
+		mmc_select_driver_type(card);
+
 	if (!IS_ERR_VALUE(err)) {
 		err = __mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
 				   EXT_CSD_HS_TIMING, EXT_CSD_TIMING_HS200,
@@ -1406,7 +1498,6 @@ static int mmc_select_hs_ddr52(struct mmc_host *host)
 	int err;
 
 	mmc_select_hs(host->card);
-	mmc_set_clock(host, MMC_HIGH_52_MAX_DTR);
 	err = mmc_select_bus_width(host->card);
 	if (err < 0) {
 		pr_err("%s: %s: select_bus_width failed(%d)\n",
@@ -1415,6 +1506,7 @@ static int mmc_select_hs_ddr52(struct mmc_host *host)
 	}
 
 	err = mmc_select_hs_ddr(host->card);
+	mmc_set_clock(host, MMC_HIGH_52_MAX_DTR);
 
 	return err;
 }
@@ -1465,6 +1557,11 @@ static int mmc_scale_low(struct mmc_host *host, unsigned long freq)
 static int mmc_scale_high(struct mmc_host *host)
 {
 	int err = 0;
+
+	if (mmc_card_ddr52(host->card)) {
+		mmc_set_timing(host, MMC_TIMING_LEGACY);
+		mmc_set_clock(host, MMC_HIGH_26_MAX_DTR);
+	}
 
 	if (!host->card->ext_csd.strobe_support) {
 		if (!(host->card->mmc_avail_type & EXT_CSD_CARD_TYPE_HS200)) {
@@ -1562,7 +1659,7 @@ static int mmc_change_bus_speed(struct mmc_host *host, unsigned long *freq)
 	 * for other timings we can simply do clock frequency change
 	 */
 	if (mmc_card_hs400(card) ||
-		(*freq == MMC_HS200_MAX_DTR)) {
+		(!mmc_card_hs200(host->card) && *freq == MMC_HS200_MAX_DTR)) {
 		err = mmc_set_clock_bus_speed(card, *freq);
 		if (err) {
 			pr_err("%s: %s: failed (%d)to set bus and clock speed (freq=%lu)\n",
@@ -1602,6 +1699,7 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 	u32 cid[4];
 	u32 rocr;
 	u8 *ext_csd = NULL;
+	bool scan = (oldcard == NULL);
 
 	BUG_ON(!host);
 	WARN_ON(!host->claimed);
@@ -1654,6 +1752,15 @@ reinit:
 	}
 
 	if (oldcard) {
+		if (oldcard->raw_cid[0] == 0 && oldcard->raw_cid[1] == 0 &&
+		    oldcard->raw_cid[2] == 0 && oldcard->raw_cid[3] == 0) {
+			scan = true;
+			pr_info("%s: updating card identification\n", mmc_hostname(host));
+			memcpy(oldcard->raw_cid, cid, sizeof(oldcard->raw_cid));
+			err = mmc_decode_cid(oldcard);
+			if (err)
+				goto err;
+		}
 		if (memcmp(cid, oldcard->raw_cid, sizeof(cid)) != 0) {
 			err = -ENOENT;
 			pr_err("%s: %s: CID memcmp failed %d\n",
@@ -1696,7 +1803,7 @@ reinit:
 		mmc_set_bus_mode(host, MMC_BUSMODE_PUSHPULL);
 	}
 
-	if (!oldcard) {
+	if (scan) {
 		/*
 		 * Fetch CSD from card.
 		 */
@@ -1740,7 +1847,7 @@ reinit:
 		}
 	}
 
-	if (!oldcard) {
+	if (scan) {
 		/*
 		 * Fetch and process extended CSD.
 		 */
@@ -2371,9 +2478,16 @@ static int _mmc_suspend(struct mmc_host *host, bool is_suspend)
 		goto out;
 
 	if (mmc_can_sleepawake(host)) {
+		/*
+		 * For caching host->ios to cached_ios we need to
+		 * make sure that clocks are not gated otherwise
+		 * cached_ios->clock will be 0.
+		 */
+		mmc_host_clk_hold(host);
 		memcpy(&host->cached_ios, &host->ios, sizeof(host->cached_ios));
 		mmc_cache_card_ext_csd(host);
 		err = mmc_sleepawake(host, true);
+		mmc_host_clk_release(host);
 	} else if (!mmc_host_is_spi(host)) {
 		err = mmc_deselect_cards(host);
 	}
@@ -2406,12 +2520,12 @@ static int mmc_partial_init(struct mmc_host *host)
 
 	mmc_host_clk_hold(host);
 
-	if (mmc_card_hs200(card) || mmc_card_hs400(card)) {
+	if (mmc_card_hs400(card)) {
 		if (card->ext_csd.strobe_support && host->ops->enhanced_strobe)
 			err = host->ops->enhanced_strobe(host);
-		else
-			err = host->ops->execute_tuning(host,
-				MMC_SEND_TUNING_BLOCK_HS200);
+	} else if (mmc_card_hs200(card) && host->ops->execute_tuning) {
+		err = host->ops->execute_tuning(host,
+			MMC_SEND_TUNING_BLOCK_HS200);
 		if (err)
 			pr_warn("%s: %s: tuning execution failed (%d)\n",
 				mmc_hostname(host), __func__, err);

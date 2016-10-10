@@ -446,7 +446,7 @@ static void fastrpc_mmap_free(struct fastrpc_mmap *map)
 	if (map->flags == ADSP_MMAP_HEAP_ADDR) {
 		DEFINE_DMA_ATTRS(attrs);
 
-		if (me->dev != NULL) {
+		if (me->dev == NULL) {
 			pr_err("failed to free remote heap allocation\n");
 			return;
 		}
@@ -1749,8 +1749,11 @@ static int fastrpc_device_open(struct inode *inode, struct file *filp)
 	fl->apps = me;
 	fl->cid = cid;
 	VERIFY(err, !fastrpc_session_alloc(&me->channel[cid], &session));
-	if (err)
+	if (err) {
+		kfree(fl);
+		fl = NULL;
 		goto bail;
+	}
 	fl->sctx = &me->channel[cid].session[session];
 
 	fl->ssrcount = me->channel[cid].ssrcount;

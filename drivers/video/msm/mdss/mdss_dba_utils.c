@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -17,9 +17,11 @@
 #include <linux/switch.h>
 
 #include "mdss_dba_utils.h"
+#include "mdss_hdmi_util.h"
 #include "mdss_hdmi_edid.h"
 #include "mdss_cec_core.h"
 #include "mdss_fb.h"
+#include "mdss_dsi.h"
 
 /* standard cec buf size + 1 byte specific to driver */
 #define CEC_BUF_SIZE    (MAX_CEC_FRAME_SIZE + 1)
@@ -32,10 +34,13 @@ struct mdss_dba_utils_data {
 	bool hpd_state;
 	bool audio_switch_registered;
 	bool display_switch_registered;
-	struct switch_dev sdev_display;
-	struct switch_dev sdev_audio;
+	struct switch_dev *sdev_display;
+	struct switch_dev *sdev_audio;
 	struct kobject *kobj;
 	struct mdss_panel_info *pinfo;
+	struct mdss_panel_info pinfo_orig;
+	struct mdss_dsi_ctrl_pdata dsi_ctrl_orig;
+	struct mdss_panel_data panel_data_orig;
 	void *dba_data;
 	void *edid_data;
 	void *cec_abst_data;
@@ -99,14 +104,14 @@ static void mdss_dba_utils_send_display_notification(
 		return;
 	}
 
-	state = udata->sdev_display.state;
+	state = udata->sdev_display->state;
 
-	switch_set_state(&udata->sdev_display, val);
+	switch_set_state(udata->sdev_display, val);
 
 	pr_debug("cable state %s %d\n",
-		udata->sdev_display.state == state ?
+		udata->sdev_display->state == state ?
 		"is same" : "switched to",
-		udata->sdev_display.state);
+		udata->sdev_display->state);
 }
 
 static void mdss_dba_utils_send_audio_notification(
@@ -124,14 +129,14 @@ static void mdss_dba_utils_send_audio_notification(
 		return;
 	}
 
-	state = udata->sdev_audio.state;
+	state = udata->sdev_audio->state;
 
-	switch_set_state(&udata->sdev_audio, val);
+	switch_set_state(udata->sdev_audio, val);
 
 	pr_debug("audio state %s %d\n",
-		udata->sdev_audio.state == state ?
+		udata->sdev_audio->state == state ?
 		"is same" : "switched to",
-		udata->sdev_audio.state);
+		udata->sdev_audio->state);
 }
 
 static ssize_t mdss_dba_utils_sysfs_rda_connected(struct device *dev,
@@ -219,13 +224,37 @@ static ssize_t mdss_dba_utils_sysfs_wta_hpd(struct device *dev,
 	return count;
 }
 
+static ssize_t mdss_dba_utils_sysfs_rda_hpd(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	ssize_t ret;
+	struct mdss_dba_utils_data *udata = NULL;
+
+	if (!dev) {
+		pr_debug("invalid device\n");
+		return -EINVAL;
+	}
+
+	udata = mdss_dba_utils_get_data(dev);
+
+	if (!udata) {
+		pr_debug("invalid input\n");
+		return -EINVAL;
+	}
+
+	ret = snprintf(buf, PAGE_SIZE, "%d\n", udata->hpd_state);
+	pr_debug("'%d'\n", udata->hpd_state);
+
+	return ret;
+}
+
 static DEVICE_ATTR(connected, S_IRUGO,
 		mdss_dba_utils_sysfs_rda_connected, NULL);
 
 static DEVICE_ATTR(video_mode, S_IRUGO,
 		mdss_dba_utils_sysfs_rda_video_mode, NULL);
 
-static DEVICE_ATTR(hpd, S_IRUGO | S_IWUSR, NULL,
+static DEVICE_ATTR(hpd, S_IRUGO | S_IWUSR, mdss_dba_utils_sysfs_rda_hpd,
 		mdss_dba_utils_sysfs_wta_hpd);
 
 static struct attribute *mdss_dba_utils_fs_attrs[] = {
@@ -267,6 +296,57 @@ static void mdss_dba_utils_sysfs_remove(struct kobject *kobj)
 	sysfs_remove_group(kobj, &mdss_dba_utils_fs_attrs_group);
 }
 
+static void mdss_dba_utils_backup_restore_dsi(struct mdss_dba_utils_data *udata)
+{
+	struct mdss_dsi_ctrl_pdata *dsi_ctrl;
+	struct mdss_panel_data *panel_data;
+	static int once = 1;
+
+	if (!udata || !udata->pinfo) {
+		pr_err("Invalid data\n");
+		return;
+	}
+
+	/*
+	 * Due to the fact that we have added generic DSI panel support
+	 * to DBA, we now can change all sorts of things within the DSI
+	 * control structures. One example is that we can configure DSI
+	 * as command mode and still use DBA.
+	 *
+	 * Because of this, it seems cleanest to completely backup the
+	 * state of the DSI driver before the first time we use it, then
+	 * restore it before each subsequent use. This ensures that each
+	 * time we begin the DBA, the state of the DSI driver is the
+	 * same, and we dont have to worry what other DBA sessions might
+	 * have done.
+	 *
+	 * It is best to do this when handling the DBA connect event,
+	 * because at this point we know DSI is stable and unused.
+	 */
+
+	panel_data = container_of(udata->pinfo, struct mdss_panel_data,
+		panel_info);
+	dsi_ctrl = container_of(panel_data, struct mdss_dsi_ctrl_pdata,
+		panel_data);
+
+	if (once) {
+		memcpy(&udata->pinfo_orig, udata->pinfo,
+			sizeof(struct mdss_panel_info));
+		memcpy(&udata->panel_data_orig, panel_data,
+			sizeof(struct mdss_panel_data));
+		memcpy(&udata->dsi_ctrl_orig, dsi_ctrl,
+			sizeof(struct mdss_dsi_ctrl_pdata));
+		once = 0;
+	} else {
+		memcpy(udata->pinfo, &udata->pinfo_orig,
+			sizeof(struct mdss_panel_info));
+		memcpy(panel_data, &udata->panel_data_orig,
+			sizeof(struct mdss_panel_data));
+		memcpy(dsi_ctrl, &udata->dsi_ctrl_orig,
+			sizeof(struct mdss_dsi_ctrl_pdata));
+	}
+}
+
 static void mdss_dba_utils_dba_cb(void *data, enum msm_dba_callback_event event)
 {
 	int ret = -EINVAL;
@@ -276,6 +356,7 @@ static void mdss_dba_utils_dba_cb(void *data, enum msm_dba_callback_event event)
 	bool operands_present = false;
 	u32 no_of_operands, size, i;
 	u32 operands_offset = MAX_CEC_FRAME_SIZE - MAX_OPERAND_SIZE;
+	struct msm_hdmi_audio_edid_blk blk;
 
 	if (!udata) {
 		pr_err("Invalid data\n");
@@ -287,35 +368,50 @@ static void mdss_dba_utils_dba_cb(void *data, enum msm_dba_callback_event event)
 	if (udata->pinfo)
 		pluggable = udata->pinfo->is_pluggable;
 
+	memset(&blk, 0, sizeof(blk));
+
 	switch (event) {
 	case MSM_DBA_CB_HPD_CONNECT:
 		if (udata->hpd_state)
 			break;
+
+		mdss_dba_utils_backup_restore_dsi(udata);
+
 		if (udata->ops.get_raw_edid) {
 			ret = udata->ops.get_raw_edid(udata->dba_data,
 				udata->edid_buf_size, udata->edid_buf, 0);
 
-			if (!ret)
+			if (!ret) {
 				hdmi_edid_parser(udata->edid_data);
-			else
+				hdmi_edid_get_audio_blk(udata->edid_data, &blk);
+				if (udata->ops.set_audio_block)
+					udata->ops.set_audio_block(
+							udata->dba_data,
+							sizeof(blk), &blk);
+				if (blk.audio_data_blk_size && pluggable)
+					mdss_dba_utils_send_audio_notification(udata, 1);
+			} else {
 				pr_err("failed to get edid%d\n", ret);
+			}
 		}
+
+		udata->hpd_state = true;
 
 		if (pluggable) {
 			mdss_dba_utils_send_display_notification(udata, 1);
-			mdss_dba_utils_send_audio_notification(udata, 1);
 		} else {
 			mdss_dba_utils_video_on(udata, udata->pinfo);
 		}
 
-		udata->hpd_state = true;
 		break;
 
 	case MSM_DBA_CB_HPD_DISCONNECT:
 		if (!udata->hpd_state)
 			break;
 		if (pluggable) {
-			mdss_dba_utils_send_audio_notification(udata, 0);
+			hdmi_edid_get_audio_blk(udata->edid_data, &blk);
+			if (blk.audio_data_blk_size)
+				mdss_dba_utils_send_audio_notification(udata, 0);
 			mdss_dba_utils_send_display_notification(udata, 0);
 		} else {
 			mdss_dba_utils_video_off(udata);
@@ -410,16 +506,14 @@ static int mdss_dba_utils_send_cec_msg(void *data, struct cec_msg *msg)
 static int mdss_dba_utils_init_switch_dev(struct mdss_dba_utils_data *udata,
 	u32 fb_node)
 {
-	int rc = -EINVAL, ret;
+	int rc = -EINVAL;
 
 	if (!udata) {
 		pr_err("invalid input\n");
 		goto end;
 	}
 
-	/* create switch device to update display modules */
-	udata->sdev_display.name = "hdmi";
-	rc = switch_dev_register(&udata->sdev_display);
+	rc = hdmi_utils_init_switch_dev(&udata->sdev_display);
 	if (rc) {
 		pr_err("display switch registration failed\n");
 		goto end;
@@ -427,15 +521,16 @@ static int mdss_dba_utils_init_switch_dev(struct mdss_dba_utils_data *udata,
 
 	udata->display_switch_registered = true;
 
-	/* create switch device to update audio modules */
-	udata->sdev_audio.name = "hdmi_audio";
-	ret = switch_dev_register(&udata->sdev_audio);
-	if (ret) {
-		pr_err("audio switch registration failed\n");
-		goto end;
-	}
+	if (udata->ops.configure_audio) {
+		rc = hdmi_utils_init_audio_switch_dev(&udata->sdev_audio);
+		if (rc) {
+			pr_err("audio switch registration failed\n");
+			hdmi_utils_deinit_switch_dev();
+			goto end;
+		}
 
-	udata->audio_switch_registered = true;
+		udata->audio_switch_registered = true;
+	}
 end:
 	return rc;
 }
@@ -584,6 +679,134 @@ void mdss_dba_utils_hdcp_enable(void *data, bool enable)
 }
 
 /**
+ * mdss_dba_utils_reconfigure_dsi() - Allow clients to perform DSI
+ *    reconfiguration at a much lower level than HDMI requires.
+ * @data: DBA utils instance which was allocated during registration
+ * @pinfo: detailed panel information like x, y, porch values etc
+ *
+ * This API is used to reconfigure the DSI data structures in preperation
+ * for unblanking a new panel.
+ *
+ * Return: returns the result of the dsi panel timing switch operation.
+ */
+int mdss_dba_utils_reconfigure_dsi(void *data, struct mdss_panel_info *pinfo)
+{
+	struct mdss_dba_utils_data *ud = data;
+	struct mdss_dsi_ctrl_pdata *ctrl;
+	struct mdss_panel_data *panel_data;
+	struct msm_dba_dsi_cfg dsi_config;
+	struct dsi_panel_timing pt;
+	int ret = 0;
+
+	if (!ud || !pinfo) {
+		pr_err("invalid input\n");
+		ret = -EINVAL;
+		goto exit;
+	}
+
+	pr_debug("%s+\n", __func__);
+
+	panel_data = container_of(pinfo, struct mdss_panel_data, panel_info);
+
+	ctrl = container_of(panel_data, struct mdss_dsi_ctrl_pdata, panel_data);
+
+	if (ud->ops.get_dsi_config) {
+		ret = ud->ops.get_dsi_config(ud->dba_data, &dsi_config);
+		if (ret) {
+			pr_err("%s: get_dsi_config not supported\n", __func__);
+			goto exit;
+		}
+	} else {
+		pr_err("%s: get_dsi_config not implemented\n", __func__);
+		ret = -ENODEV;
+		goto exit;
+	}
+
+	pinfo->physical_width = dsi_config.physical_width_dim;
+	pinfo->physical_height = dsi_config.physical_length_dim;
+	pinfo->bpp = dsi_config.bpp;
+	pinfo->mipi.mode = dsi_config.mode;
+	pinfo->type = pinfo->mipi.mode == DSI_VIDEO_MODE ? MIPI_VIDEO_PANEL :
+		MIPI_CMD_PANEL;
+	pinfo->mipi.pixel_packing = dsi_config.pixel_packing;
+	if (mdss_panel_get_dst_fmt(pinfo->bpp, pinfo->mipi.mode,
+	    pinfo->mipi.pixel_packing, &(pinfo->mipi.dst_format))) {
+		pr_debug("%s: problem determining dst format. Set Default\n",
+			__func__);
+		pinfo->mipi.dst_format = DSI_VIDEO_DST_FORMAT_RGB888;
+	}
+	/* TODO: pinfo->lcdc.underflow_clr */
+	/* TODO: pinfo->lcdc.border_clr */
+	/* TODO: pinfo->panel_orientation */
+	/* TODO: pinfo->mipi.interleave_mode */
+	/* TODO: pinfo->mipi.vsync_enable */
+	pinfo->mipi.traffic_mode = dsi_config.traffic_mode;
+	pinfo->mipi.vc = dsi_config.virtual_channel_id;
+	pinfo->mipi.rgb_swap = dsi_config.color_order;
+	/* TODO: pinfo->mipi.rx_eot_ignore */
+	pinfo->mipi.tx_eot_append = dsi_config.eot_mode;
+
+	pinfo->mipi.data_lane0 = dsi_config.num_lanes > 0;
+	pinfo->mipi.data_lane1 = dsi_config.num_lanes > 1;
+	pinfo->mipi.data_lane2 = dsi_config.num_lanes > 2;
+	pinfo->mipi.data_lane3 = dsi_config.num_lanes > 3;
+
+	memset(&pt, 0, sizeof(pt));
+	pt.timing.xres = dsi_config.width;
+	pt.timing.yres = dsi_config.height;
+	pt.timing.h_front_porch = dsi_config.horizontal_front_porch;
+	pt.timing.h_back_porch = dsi_config.horizontal_back_porch;
+	pt.timing.h_pulse_width = dsi_config.horizontal_pulse_width;
+	pt.timing.hsync_skew = dsi_config.horizontal_sync_skew;
+	pt.timing.v_back_porch = dsi_config.vertical_back_porch;
+	pt.timing.v_front_porch = dsi_config.vertical_front_porch;
+	pt.timing.v_pulse_width = dsi_config.vertical_pulse_width;
+	pt.timing.border_left = dsi_config.horizontal_left_border;
+	pt.timing.border_right = dsi_config.horizontal_right_border;
+	pt.timing.border_top = dsi_config.vertical_top_border;
+	pt.timing.border_bottom = dsi_config.vertical_bottom_border;
+	pt.timing.frame_rate = dsi_config.framerate;
+	pt.timing.clk_rate = dsi_config.clockrate * dsi_config.num_lanes;
+	pt.t_clk_pre = dsi_config.t_clk_pre;
+	pt.t_clk_post = dsi_config.t_clk_post;
+
+	pinfo->mipi.dsi_pclk_rate = pt.timing.clk_rate;
+	do_div(pinfo->mipi.dsi_pclk_rate, dsi_config.bpp);
+
+	ret = mdss_dsi_panel_timing_switch(ctrl, &pt.timing);
+	if (ret)
+		pr_err("%s: failed to switch panel timing\n", __func__);
+
+exit:
+	return ret;
+}
+
+/**
+ * mdss_dba_utils_get_dsi_hs_clk_always_on() - Allow clients to inform if client
+ *        wants to keep the DSI HS clock always-on.
+ * @data: DBA utils instance which was allocated during registration
+ *
+ * Return: returns true if DSI HS clock needs to be always-on.
+ */
+bool mdss_dba_utils_get_dsi_hs_clk_always_on(void *data)
+{
+	struct mdss_dba_utils_data *ud = data;
+	bool dsi_hs_clk_always_on = false;
+
+	if (!ud) {
+		pr_err("invalid input\n");
+		goto end;
+	}
+
+	pr_debug("%s\n", __func__);
+	if (ud->ops.get_dsi_hs_clk_always_on)
+		dsi_hs_clk_always_on =
+			ud->ops.get_dsi_hs_clk_always_on(ud->dba_data);
+end:
+	return dsi_hs_clk_always_on;
+}
+
+/**
  * mdss_dba_utils_init() - Allow clients to register with DBA utils
  * @uid: Initialization data for registration.
  *
@@ -652,13 +875,6 @@ void *mdss_dba_utils_init(struct mdss_dba_utils_init_data *uid)
 	udata->kobj = uid->kobj;
 	udata->pinfo = uid->pinfo;
 
-	/* register display and audio switch devices */
-	ret = mdss_dba_utils_init_switch_dev(udata, uid->fb_node);
-	if (ret) {
-		pr_err("switch dev registration failed\n");
-		goto error;
-	}
-
 	/* Initialize EDID feature */
 	edid_init_data.kobj = uid->kobj;
 	edid_init_data.ds_data.ds_registered = true;
@@ -675,10 +891,15 @@ void *mdss_dba_utils_init(struct mdss_dba_utils_init_data *uid)
 
 	/* update edid data to retrieve it back in edid parser */
 	if (uid->pinfo) {
+		u32 default_resolution = DEFAULT_VIDEO_RESOLUTION;
 		uid->pinfo->edid_data = udata->edid_data;
+
+		if (udata->ops.get_default_resolution)
+			default_resolution = udata->ops.get_default_resolution(
+				udata->dba_data);
 		/* Initialize to default resolution */
 		hdmi_edid_set_video_resolution(uid->pinfo->edid_data,
-					DEFAULT_VIDEO_RESOLUTION, true);
+					default_resolution, true);
 	}
 
 	/* get edid buffer from edid parser */
@@ -714,10 +935,18 @@ void *mdss_dba_utils_init(struct mdss_dba_utils_init_data *uid)
 		 * this explicit calls to bridge chip driver.
 		 */
 		if (!uid->pinfo->is_pluggable) {
-			if (udata->ops.power_on)
+			if (udata->ops.power_on && !(uid->cont_splash_enabled))
 				udata->ops.power_on(udata->dba_data, true, 0);
 			if (udata->ops.check_hpd)
 				udata->ops.check_hpd(udata->dba_data, 0);
+		} else {
+			/* register display and audio switch devices */
+			ret = mdss_dba_utils_init_switch_dev(udata,
+				uid->fb_node);
+			if (ret) {
+				pr_err("switch dev registration failed\n");
+				goto error;
+			}
 		}
 	}
 
@@ -755,11 +984,17 @@ void mdss_dba_utils_deinit(void *data)
 		udata->pinfo->is_cec_supported = false;
 	}
 
-	if (udata->audio_switch_registered)
-		switch_dev_unregister(&udata->sdev_audio);
+	if (udata->audio_switch_registered) {
+		hdmi_utils_deinit_audio_switch_dev();
+		udata->sdev_audio = NULL;
+		udata->audio_switch_registered = false;
+	}
 
-	if (udata->display_switch_registered)
-		switch_dev_unregister(&udata->sdev_display);
+	if (udata->display_switch_registered) {
+		hdmi_utils_deinit_switch_dev();
+		udata->sdev_display = NULL;
+		udata->display_switch_registered = false;
+	}
 
 	if (udata->kobj)
 		mdss_dba_utils_sysfs_remove(udata->kobj);

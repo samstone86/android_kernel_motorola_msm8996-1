@@ -1422,7 +1422,7 @@ static int msm_spi_process_transfer(struct msm_spi *dd)
 	msm_spi_udelay(dd->xfrs_delay_usec);
 
 transfer_end:
-	if ((dd->mode == SPI_BAM_MODE) && status)
+	if ((dd->mode == SPI_BAM_MODE) && (!dd->pdata->rt_priority || status))
 		msm_spi_bam_flush(dd);
 	msm_spi_dma_unmap_buffers(dd);
 	dd->mode = SPI_MODE_NONE;
@@ -1455,6 +1455,9 @@ static inline void msm_spi_set_cs(struct spi_device *spi, bool set_flag)
 	}
 
 	msm_spi_clk_path_vote(dd, spi->max_speed_hz);
+
+	if (dd->pdata->use_hw_cs)
+		return;
 
 	if (!(spi->mode & SPI_CS_HIGH))
 		set_flag = !set_flag;
@@ -1656,8 +1659,13 @@ static int msm_spi_prepare_transfer_hardware(struct spi_master *master)
 	int resume_state = 0;
 
 	resume_state = pm_runtime_get_sync(dd->dev);
-	if (resume_state < 0)
+	if (resume_state < 0 && resume_state != -EACCES) {
+		dev_err(dd->dev, "pm_runtime_get_sync: %d\n", resume_state);
 		goto spi_finalize;
+	}
+
+	if (resume_state == -EACCES)
+		dev_warn(dd->dev, "pm runtime disabled\n");
 
 	/*
 	 * Counter-part of system-suspend when runtime-pm is not enabled.
@@ -1780,15 +1788,15 @@ err_setup_exit:
 
 static int debugfs_iomem_x32_set(void *data, u64 val)
 {
-	struct msm_spi_regs *debugfs_spi_regs = (struct msm_spi_regs *)data;
-	struct msm_spi *dd = debugfs_spi_regs->dd;
+	struct msm_spi *dd = (struct msm_spi *)data;
+	struct msm_spi_regs *debugfs_spi_reg = dd->debugfs_spi_reg;
 	int ret;
 
 	ret = pm_runtime_get_sync(dd->dev);
 	if (ret < 0)
 		return ret;
 
-	writel_relaxed(val, (dd->base + debugfs_spi_regs->offset));
+	writel_relaxed(val, (dd->base + debugfs_spi_reg->offset));
 	/* Ensure the previous write completed. */
 	mb();
 
@@ -1799,14 +1807,14 @@ static int debugfs_iomem_x32_set(void *data, u64 val)
 
 static int debugfs_iomem_x32_get(void *data, u64 *val)
 {
-	struct msm_spi_regs *debugfs_spi_regs = (struct msm_spi_regs *)data;
-	struct msm_spi *dd = debugfs_spi_regs->dd;
+	struct msm_spi *dd = (struct msm_spi *)data;
+	struct msm_spi_regs *debugfs_spi_reg = dd->debugfs_spi_reg;
 	int ret;
 
 	ret = pm_runtime_get_sync(dd->dev);
 	if (ret < 0)
 		return ret;
-	*val = readl_relaxed(dd->base + debugfs_spi_regs->offset);
+	*val = readl_relaxed(dd->base + debugfs_spi_reg->offset);
 	/* Ensure the previous read completed. */
 	mb();
 
@@ -1825,13 +1833,13 @@ static void spi_debugfs_init(struct msm_spi *dd)
 		int i;
 
 		for (i = 0; i < ARRAY_SIZE(debugfs_spi_regs); i++) {
-			debugfs_spi_regs[i].dd = dd;
-			dd->debugfs_spi_regs[i] =
+			dd->debugfs_spi_reg = debugfs_spi_regs + i;
+			dd->debugfs_spi_file[i] =
 			   debugfs_create_file(
 			       debugfs_spi_regs[i].name,
 			       debugfs_spi_regs[i].mode,
 			       dd->dent_spi,
-			       debugfs_spi_regs+i,
+			       dd,
 			       &fops_iomem_x32);
 		}
 	}
@@ -1845,7 +1853,7 @@ static void spi_debugfs_exit(struct msm_spi *dd)
 		debugfs_remove_recursive(dd->dent_spi);
 		dd->dent_spi = NULL;
 		for (i = 0; i < ARRAY_SIZE(debugfs_spi_regs); i++)
-			dd->debugfs_spi_regs[i] = NULL;
+			dd->debugfs_spi_file[i] = NULL;
 	}
 }
 #else
@@ -2001,11 +2009,6 @@ static void msm_spi_bam_teardown(struct msm_spi *dd)
 {
 	msm_spi_bam_pipe_teardown(dd, SPI_BAM_PRODUCER_PIPE);
 	msm_spi_bam_pipe_teardown(dd, SPI_BAM_CONSUMER_PIPE);
-
-	if (dd->bam.deregister_required) {
-		sps_deregister_bam_device(dd->bam.handle);
-		dd->bam.deregister_required = false;
-	}
 }
 
 static int msm_spi_bam_init(struct msm_spi *dd)
@@ -2029,7 +2032,6 @@ static int msm_spi_bam_init(struct msm_spi *dd)
 				__func__);
 			return rc;
 		}
-		dd->bam.deregister_required = true;
 	}
 
 	dd->bam.handle = bam_handle;
@@ -2178,6 +2180,8 @@ struct msm_spi_platform_data *msm_spi_dt_to_pdata(
 			&pdata->rt_priority,		 DT_OPT,  DT_BOOL,  0},
 		{"qcom,shared",
 			&pdata->is_shared,		 DT_OPT,  DT_BOOL,  0},
+		{"qcom,use-hw-cs",
+			&pdata->use_hw_cs,               DT_OPT,  DT_BOOL,  0},
 		{NULL,  NULL,                            0,       0,        0},
 		};
 
@@ -2283,8 +2287,10 @@ static int init_resources(struct platform_device *pdev)
 		goto err_pclk_get;
 	}
 
-	if (dd->pdata && dd->pdata->max_clock_speed)
+	if (dd->pdata && dd->pdata->max_clock_speed) {
 		msm_spi_clock_set(dd, dd->pdata->max_clock_speed);
+		master->max_speed_hz = dd->pdata->max_clock_speed;
+	}
 
 	rc = clk_prepare_enable(dd->clk);
 	if (rc) {
@@ -2667,8 +2673,7 @@ static int msm_spi_remove(struct platform_device *pdev)
 
 	if (dd->dma_teardown)
 		dd->dma_teardown(dd);
-	pm_runtime_disable(&pdev->dev);
-	pm_runtime_set_suspended(&pdev->dev);
+	pm_runtime_force_suspend(&pdev->dev);
 	clk_put(dd->clk);
 	clk_put(dd->pclk);
 	msm_spi_clk_path_teardown(dd);

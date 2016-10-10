@@ -40,6 +40,8 @@ struct device_node *of_stdout;
 
 struct kset *of_kset;
 
+static struct device_node *__of_find_node_by_path(const char *path);
+
 /*
  * Used to protect the of_aliases, to hold off addition of nodes to sysfs.
  * This mutex must be held whenever modifications are being made to the
@@ -507,24 +509,51 @@ EXPORT_SYMBOL(of_machine_is_compatible);
  *
  *  @device: Node to check for availability, with locks already held
  *
- *  Returns 1 if the status property is absent or set to "okay" or "ok",
+ *  Returns 1 if the status property
+ *  -- is absent or set to "okay" or "ok",
+ *  -- refers to another property using string list as following
+ *     status = <path>, <okay property>, <value1>[, <value2>...];
+ *     and at least one <value> in the list of values matches
+ *     value of /<path>/<okay property>.
  *  0 otherwise
  */
 static int __of_device_is_available(const struct device_node *device)
 {
-	const char *status;
-	int statlen;
+	struct property *pp;
+	struct device_node *np;
+	const char *val, *status;
+	const char *okay_prop_name, *okay_val;
+	int len;
 
 	if (!device)
 		return 0;
 
-	status = __of_get_property(device, "status", &statlen);
-	if (status == NULL)
+	pp = __of_find_property(device, "status", &len);
+	if (pp == NULL)
 		return 1;
 
-	if (statlen > 0) {
+	status = pp->value;
+
+	if (len > 0) {
 		if (!strcmp(status, "okay") || !strcmp(status, "ok"))
 			return 1;
+
+		okay_prop_name = of_prop_next_string(pp, status);
+		if (!okay_prop_name)
+			return 0;
+
+		np = __of_find_node_by_path(status);
+		if (!np)
+			return 0;
+
+		okay_val = __of_get_property(np, okay_prop_name, &len);
+		if (okay_val == NULL || len <= 0)
+			return 0;
+
+		val = okay_prop_name;
+		while ((val = of_prop_next_string(pp, val)))
+			if (!strcmp(val, okay_val))
+				return 1;
 	}
 
 	return 0;
@@ -694,7 +723,7 @@ struct device_node *of_get_child_by_name(const struct device_node *node,
 }
 EXPORT_SYMBOL(of_get_child_by_name);
 
-static struct device_node *__of_find_node_by_path(struct device_node *parent,
+static struct device_node *__of_find_child_node_by_path(struct device_node *parent,
 						const char *path)
 {
 	struct device_node *child;
@@ -714,6 +743,45 @@ static struct device_node *__of_find_node_by_path(struct device_node *parent,
 	return NULL;
 }
 
+static struct device_node *__of_find_node_by_path(const char *path)
+{
+	struct device_node *np = NULL;
+	struct property *pp;
+
+	if (strcmp(path, "/") == 0)
+		return of_node_get(of_allnodes);
+
+	/* The path could begin with an alias */
+	if (*path != '/') {
+		char *p = strchrnul(path, '/');
+		int len = p - path;
+
+		/* of_aliases must not be NULL */
+		if (!of_aliases)
+			return NULL;
+
+		for_each_property_of_node(of_aliases, pp) {
+			if (strlen(pp->name) == len && !strncmp(pp->name, path, len)) {
+				np = __of_find_node_by_path(pp->value);
+				break;
+			}
+		}
+		if (!np)
+			return NULL;
+		path = p;
+	}
+
+	/* Step down the tree matching path components */
+	if (!np)
+		np = of_node_get(of_allnodes);
+	while (np && *path == '/') {
+		path++; /* Increment past '/' delimiter */
+		np = __of_find_child_node_by_path(np, path);
+		path = strchrnul(path, '/');
+	}
+	return np;
+}
+
 /**
  *	of_find_node_by_path - Find a node matching a full OF path
  *	@path: Either the full path to match, or if the path does not
@@ -731,42 +799,14 @@ static struct device_node *__of_find_node_by_path(struct device_node *parent,
  */
 struct device_node *of_find_node_by_path(const char *path)
 {
-	struct device_node *np = NULL;
-	struct property *pp;
+	struct device_node *np;
 	unsigned long flags;
 
 	if (strcmp(path, "/") == 0)
 		return of_node_get(of_allnodes);
 
-	/* The path could begin with an alias */
-	if (*path != '/') {
-		char *p = strchrnul(path, '/');
-		int len = p - path;
-
-		/* of_aliases must not be NULL */
-		if (!of_aliases)
-			return NULL;
-
-		for_each_property_of_node(of_aliases, pp) {
-			if (strlen(pp->name) == len && !strncmp(pp->name, path, len)) {
-				np = of_find_node_by_path(pp->value);
-				break;
-			}
-		}
-		if (!np)
-			return NULL;
-		path = p;
-	}
-
-	/* Step down the tree matching path components */
 	raw_spin_lock_irqsave(&devtree_lock, flags);
-	if (!np)
-		np = of_node_get(of_allnodes);
-	while (np && *path == '/') {
-		path++; /* Increment past '/' delimiter */
-		np = __of_find_node_by_path(np, path);
-		path = strchrnul(path, '/');
-	}
+	np = __of_find_node_by_path(path);
 	raw_spin_unlock_irqrestore(&devtree_lock, flags);
 	return np;
 }

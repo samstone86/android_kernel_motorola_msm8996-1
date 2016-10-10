@@ -215,7 +215,7 @@ do { \
 
 #define GLINK_PKT_ERR(x...) \
 do { \
-	pr_err("<GLINK_PKT> err: "x); \
+	pr_err_ratelimited("<GLINK_PKT> err: "x); \
 	GLINK_PKT_LOG_STRING(x); \
 } while (0)
 
@@ -886,6 +886,9 @@ int glink_pkt_open(struct inode *inode, struct file *file)
 	int ret = 0;
 	struct glink_pkt_dev *devp = NULL;
 	int wait_time;
+#ifdef CONFIG_PANIC_ON_GLINK_ERR
+	static int err_count;
+#endif /* CONFIG_PANIC_ON_GLINK_ERR */
 
 	devp = container_of(inode->i_cdev, struct glink_pkt_dev, cdev);
 	if (!devp) {
@@ -918,6 +921,14 @@ int glink_pkt_open(struct inode *inode, struct file *file)
 			GLINK_PKT_ERR(
 			"%s:failed for prev close on dev id:%d rc:%d\n",
 			__func__, devp->i, ret);
+#ifdef CONFIG_PANIC_ON_GLINK_ERR
+			/* force panic in order to get the ramdump */
+			if (-512 == ret) {
+				if (++err_count == 100) {
+					BUG_ON(1);
+				}
+			}
+#endif /* CONFIG_PANIC_ON_GLINK_ERR */
 			return ret;
 		}
 		mutex_lock(&devp->ch_lock);

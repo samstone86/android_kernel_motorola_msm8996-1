@@ -721,6 +721,9 @@ struct signal_struct {
 	short oom_score_adj;		/* OOM kill score adjustment */
 	short oom_score_adj_min;	/* OOM kill score adjustment min value.
 					 * Only settable by CAP_SYS_RESOURCE. */
+#ifdef CONFIG_ANDROID_LMK_ADJ_RBTREE
+	struct rb_node adj_node;
+#endif
 
 	struct mutex cred_guard_mutex;	/* guard against foreign influences on
 					 * credential calculations
@@ -1137,6 +1140,7 @@ struct sched_statistics {
 #endif
 
 #define RAVG_HIST_SIZE_MAX  5
+#define NUM_BUSY_BUCKETS 10
 
 /* ravg represents frequency scaled cpu-demand of tasks */
 struct ravg {
@@ -1161,6 +1165,11 @@ struct ravg {
 	 *
 	 * 'prev_window' represents task's contribution to cpu busy time
 	 * statistics (rq->prev_runnable_sum) in previous window
+	 *
+	 * 'pred_demand' represents task's current predicted cpu busy time
+	 *
+	 * 'busy_buckets' groups historical busy time into different buckets
+	 * used for prediction
 	 */
 	u64 mark_start;
 	u32 sum, demand;
@@ -1168,6 +1177,8 @@ struct ravg {
 #ifdef CONFIG_SCHED_FREQ_INPUT
 	u32 curr_window, prev_window;
 	u16 active_windows;
+	u32 pred_demand;
+	u8 busy_buckets[NUM_BUSY_BUCKETS];
 #endif
 };
 
@@ -1316,6 +1327,7 @@ struct task_struct {
 	u32 init_load_pct;
 	u64 last_wake_ts;
 	u64 last_switch_out_ts;
+	u64 last_cpu_selected_ts;
 #ifdef CONFIG_SCHED_QHMP
 	u64 run_start;
 #endif
@@ -1551,6 +1563,9 @@ struct task_struct {
 	struct held_lock held_locks[MAX_LOCK_DEPTH];
 	gfp_t lockdep_reclaim_gfp;
 #endif
+#ifdef CONFIG_UBSAN
+	unsigned int in_ubsan;
+#endif
 
 /* journalling filesystem info */
 	void *journal_info;
@@ -1781,6 +1796,14 @@ static inline struct pid *task_tgid(struct task_struct *task)
 	return task->group_leader->pids[PIDTYPE_PID].pid;
 }
 
+#ifdef CONFIG_ANDROID_LMK_ADJ_RBTREE
+extern void add_2_adj_tree(struct task_struct *task);
+extern void delete_from_adj_tree(struct task_struct *task);
+#else
+static inline void add_2_adj_tree(struct task_struct *task) { }
+static inline void delete_from_adj_tree(struct task_struct *task) { }
+#endif
+
 /*
  * Without tasklist or rcu lock it is not safe to dereference
  * the result of task_pgrp/task_session even if task == current,
@@ -1972,6 +1995,7 @@ extern int task_free_unregister(struct notifier_block *n);
 struct sched_load {
 	unsigned long prev_load;
 	unsigned long new_task_load;
+	unsigned long predicted_load;
 };
 
 #if defined(CONFIG_SCHED_FREQ_INPUT)

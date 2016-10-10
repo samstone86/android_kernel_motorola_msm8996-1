@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -16,6 +16,7 @@
 #include <linux/sched.h>
 #include <linux/jiffies.h>
 #include <linux/err.h>
+#include <linux/dropbox.h>
 
 #include "kgsl.h"
 #include "kgsl_cffdump.h"
@@ -78,59 +79,69 @@ unsigned int adreno_cmdbatch_timeout = 2000;
 /* Interval for reading and comparing fault detection registers */
 static unsigned int _fault_timer_interval = 200;
 
-/**
- * _track_context - Add a context ID to the list of recently seen contexts
- * for the command queue
- * @cmdqueue: cmdqueue to add the context to
- * @id: ID of the context to add
- *
- * This function is called when a new item is added to a context - this tracks
- * the number of active contexts seen in the last 100ms for the command queue
- */
-static void _track_context(struct adreno_dispatcher_cmdqueue *cmdqueue,
-		unsigned int id)
+static void _add_context(struct adreno_device *adreno_dev,
+		struct adreno_context *drawctxt)
 {
-	struct adreno_context_list *list = cmdqueue->active_contexts;
-	int oldest = -1, empty = -1;
-	unsigned long age = 0;
-	int i, count = 0;
-	bool updated = false;
+	/* Remove it from the list */
+	list_del_init(&drawctxt->active_node);
 
-	for (i = 0; i < ACTIVE_CONTEXT_LIST_MAX; i++) {
+	/* And push it to the front */
+	drawctxt->active_time = jiffies;
+	list_add(&drawctxt->active_node, &adreno_dev->active_list);
+}
 
-		/* If the new ID matches the slot update the expire time */
-		if (list[i].id == id) {
-			list[i].jiffies = jiffies + msecs_to_jiffies(100);
-			updated = true;
-			count++;
-			continue;
-		}
+static int __count_context(struct adreno_context *drawctxt, void *data)
+{
+	unsigned long expires = drawctxt->active_time + msecs_to_jiffies(100);
 
-		/* Remember and skip empty slots */
-		if ((list[i].id == 0) ||
-			time_after(jiffies, list[i].jiffies)) {
-			empty = i;
-			continue;
-		}
+	return time_after(jiffies, expires) ? 0 : 1;
+}
+
+static int __count_cmdqueue_context(struct adreno_context *drawctxt, void *data)
+{
+	unsigned long expires = drawctxt->active_time + msecs_to_jiffies(100);
+
+	if (time_after(jiffies, expires))
+		return 0;
+
+	return (&drawctxt->rb->dispatch_q ==
+			(struct adreno_dispatcher_cmdqueue *) data) ? 1 : 0;
+}
+
+static int _adreno_count_active_contexts(struct adreno_device *adreno_dev,
+		int (*func)(struct adreno_context *, void *), void *data)
+{
+	struct adreno_context *ctxt;
+	int count = 0;
+
+	list_for_each_entry(ctxt, &adreno_dev->active_list, active_node) {
+		if (func(ctxt, data) == 0)
+			return count;
 
 		count++;
-
-		/* Remember the oldest active entry */
-		if (oldest == -1 || time_before(list[i].jiffies, age)) {
-			age = list[i].jiffies;
-			oldest = i;
-		}
 	}
 
-	if (updated == false) {
-		int pos = (empty != -1) ? empty : oldest;
+	return count;
+}
 
-		list[pos].jiffies = jiffies + msecs_to_jiffies(100);
-		list[pos].id = id;
-		count++;
-	}
+static void _track_context(struct adreno_device *adreno_dev,
+		struct adreno_dispatcher_cmdqueue *cmdqueue,
+		struct adreno_context *drawctxt)
+{
+	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 
-	cmdqueue->active_context_count = count;
+	spin_lock(&adreno_dev->active_list_lock);
+
+	_add_context(adreno_dev, drawctxt);
+
+	device->active_context_count =
+			_adreno_count_active_contexts(adreno_dev,
+					__count_context, NULL);
+	cmdqueue->active_context_count =
+			_adreno_count_active_contexts(adreno_dev,
+					__count_cmdqueue_context, cmdqueue);
+
+	spin_unlock(&adreno_dev->active_list_lock);
 }
 
 /*
@@ -639,7 +650,8 @@ static int sendcmd(struct adreno_device *adreno_dev,
 	 * we just submitted something, readjust ringbuffer
 	 * execution level
 	 */
-	gpudev->preemption_schedule(adreno_dev);
+	if (gpudev->preemption_schedule)
+		gpudev->preemption_schedule(adreno_dev);
 	return 0;
 }
 
@@ -1177,9 +1189,11 @@ int adreno_dispatcher_queue_cmd(struct adreno_device *adreno_dev,
 	drawctxt->queued++;
 	trace_adreno_cmdbatch_queued(cmdbatch, drawctxt->queued);
 
-	_track_context(dispatch_q, drawctxt->base.id);
+	_track_context(adreno_dev, dispatch_q, drawctxt);
 
 	spin_unlock(&drawctxt->lock);
+
+	kgsl_pwrctrl_update_l2pc(&adreno_dev->dev);
 
 	/* Add the context to the dispatcher pending list */
 	dispatcher_queue_context(adreno_dev, drawctxt);
@@ -1384,10 +1398,20 @@ static inline const char *_kgsl_context_comm(struct kgsl_context *context)
 	return _pidname;
 }
 
+#define GPU_FT_REPORT_LEN 256
+static char gpu_ft_report[GPU_FT_REPORT_LEN];
+static int gpu_ft_report_pos;
+#define pr_gpu_ft_report(fmt, args...) \
+		(gpu_ft_report_pos += scnprintf( \
+		&gpu_ft_report[gpu_ft_report_pos], \
+		GPU_FT_REPORT_LEN - gpu_ft_report_pos, \
+		fmt, ##args))
+
 #define pr_fault(_d, _c, fmt, args...) \
 		dev_err((_d)->dev, "%s[%d]: " fmt, \
 		_kgsl_context_comm((_c)->context), \
-		(_c)->context->proc_priv->pid, ##args)
+		(_c)->context->proc_priv->pid, ##args); \
+		pr_gpu_ft_report(fmt, ##args)
 
 
 static void adreno_fault_header(struct kgsl_device *device,
@@ -1445,7 +1469,7 @@ void adreno_fault_skipcmd_detached(struct adreno_device *adreno_dev,
 {
 	if (test_bit(ADRENO_CONTEXT_SKIP_CMD, &drawctxt->base.priv) &&
 			kgsl_context_detached(&drawctxt->base)) {
-		pr_context(KGSL_DEVICE(adreno_dev), cmdbatch->context,
+		pr_fault(KGSL_DEVICE(adreno_dev), cmdbatch,
 			"gpu detached context %d\n", cmdbatch->context->id);
 		clear_bit(ADRENO_CONTEXT_SKIP_CMD, &drawctxt->base.priv);
 	}
@@ -1492,7 +1516,7 @@ static void process_cmdbatch_fault(struct kgsl_device *device,
 					_fault_throttle_burst) {
 				set_bit(KGSL_FT_DISABLE,
 						&cmdbatch->fault_policy);
-				pr_context(device, cmdbatch->context,
+				pr_fault(device, cmdbatch,
 					 "gpu fault threshold exceeded %d faults in %d msecs\n",
 					 _fault_throttle_burst,
 					 _fault_throttle_time);
@@ -1616,7 +1640,7 @@ static void process_cmdbatch_fault(struct kgsl_device *device,
 
 	/* If we get here then all the policies failed */
 
-	pr_context(device, cmdbatch->context, "gpu %s ctx %d ts %d\n",
+	pr_fault(device, cmdbatch, "gpu %s ctx %d ts %d\n",
 		state, cmdbatch->context->id, cmdbatch->timestamp);
 
 	/* Mark the context as failed */
@@ -1624,6 +1648,10 @@ static void process_cmdbatch_fault(struct kgsl_device *device,
 
 	/* Invalidate the context */
 	adreno_drawctxt_invalidate(device, cmdbatch->context);
+
+	/* Log GPU FT report for failed recovery */
+	dropbox_queue_event_text("gpu_ft_report", gpu_ft_report,
+		gpu_ft_report_pos);
 }
 
 /**
@@ -1723,7 +1751,7 @@ replay:
 		 */
 
 		if (ret) {
-			pr_context(device, replay[i]->context,
+			pr_fault(device, replay[i],
 				"gpu reset failed ctx %d ts %d\n",
 				replay[i]->context->id, replay[i]->timestamp);
 
@@ -1840,9 +1868,23 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 
 	if (cmdbatch == NULL ||
 		!test_bit(KGSL_FT_SKIP_PMDUMP, &cmdbatch->fault_policy)) {
+		char *path;
+		char sys_path[256];
+
+		gpu_ft_report_pos = 0;
+		pr_gpu_ft_report("GPU FT: fault = %d\n%s[%d]\n", fault,
+			_kgsl_context_comm(cmdbatch->context),
+			cmdbatch->context->proc_priv->pid);
+
 		adreno_fault_header(device, hung_rb, cmdbatch);
 		kgsl_device_snapshot(device,
 			cmdbatch ? cmdbatch->context : NULL);
+
+		path = kobject_get_path(&device->snapshot_kobj, GFP_KERNEL);
+		snprintf(sys_path, sizeof(sys_path), "/sys%s/dump", path);
+		kfree(path);
+
+		dropbox_queue_event_binaryfile("gpu_snapshot", sys_path);
 	}
 
 	/* Terminate the stalled transaction and resume the IOMMU */
@@ -1924,7 +1966,7 @@ static void _print_recovery(struct kgsl_device *device,
 		}
 	}
 
-	pr_context(device, cmdbatch->context,
+	pr_fault(device, cmdbatch,
 		"gpu %s ctx %d ts %d policy %lX\n",
 		result, cmdbatch->context->id, cmdbatch->timestamp,
 		cmdbatch->fault_recovery);
@@ -1986,6 +2028,10 @@ int adreno_dispatch_process_cmdqueue(struct adreno_device *adreno_dev,
 
 				_print_recovery(KGSL_DEVICE(adreno_dev),
 					cmdbatch);
+
+				/* Log GPU FT report for successful recovery */
+				dropbox_queue_event_text("gpu_ft_report",
+					gpu_ft_report, gpu_ft_report_pos);
 			}
 
 			/* Reduce the number of inflight command batches */
@@ -2061,7 +2107,7 @@ int adreno_dispatch_process_cmdqueue(struct adreno_device *adreno_dev,
 
 		/* Boom goes the dynamite */
 
-		pr_context(KGSL_DEVICE(adreno_dev), cmdbatch->context,
+		pr_fault(KGSL_DEVICE(adreno_dev), cmdbatch,
 			"gpu timeout ctx %d ts %d\n",
 			cmdbatch->context->id, cmdbatch->timestamp);
 
@@ -2106,7 +2152,8 @@ static void adreno_dispatcher_work(struct work_struct *work)
 	if (dispatcher_do_fault(adreno_dev))
 		goto done;
 
-	gpudev->preemption_schedule(adreno_dev);
+	if (gpudev->preemption_schedule)
+		gpudev->preemption_schedule(adreno_dev);
 
 	if (cur_rb_id != adreno_dev->cur_rb->id) {
 		struct adreno_dispatcher_cmdqueue *dispatch_q =
@@ -2571,7 +2618,7 @@ void adreno_dispatcher_preempt_callback(struct adreno_device *adreno_dev,
 	struct adreno_dispatcher *dispatcher = &(adreno_dev->dispatcher);
 	if (ADRENO_DISPATCHER_PREEMPT_TRIGGERED !=
 			atomic_read(&dispatcher->preemption_state)) {
-		KGSL_DRV_INFO(KGSL_DEVICE(adreno_dev),
+		KGSL_DRV_CRIT_RATELIMIT(KGSL_DEVICE(adreno_dev),
 			"Preemption interrupt generated w/o trigger!\n");
 		return;
 	}

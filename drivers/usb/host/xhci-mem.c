@@ -1477,6 +1477,8 @@ int xhci_endpoint_init(struct xhci_hcd *xhci,
 		}
 		break;
 	case USB_SPEED_FULL:
+		if (usb_endpoint_xfer_bulk(&ep->desc) && max_packet < 8)
+			max_packet = 8;
 	case USB_SPEED_LOW:
 		break;
 	default:
@@ -1882,6 +1884,12 @@ no_bw:
 	kfree(xhci->port_array);
 	kfree(xhci->rh_bw);
 	kfree(xhci->ext_caps);
+
+	xhci->usb2_ports = NULL;
+	xhci->usb3_ports = NULL;
+	xhci->port_array = NULL;
+	xhci->rh_bw = NULL;
+	xhci->ext_caps = NULL;
 
 	xhci->page_size = 0;
 	xhci->page_shift = 0;

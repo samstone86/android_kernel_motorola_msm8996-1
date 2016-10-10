@@ -40,6 +40,7 @@
 
 #include <trace/events/task.h>
 #include "internal.h"
+#include "coredump_gz.h"
 
 #include <trace/events/sched.h>
 
@@ -260,6 +261,8 @@ static int format_corename(struct core_name *cn, struct coredump_params *cprm)
 	}
 
 out:
+	check_for_gz(ispipe, core_pattern, cprm);
+
 	/* Backward compatibility with core_uses_pid:
 	 *
 	 * If core_pattern does not include a %p (as is the default)
@@ -497,6 +500,45 @@ static int umh_pipe_setup(struct subprocess_info *info, struct cred *new)
 	return err;
 }
 
+#ifdef CONFIG_COREDUMP_PERMISSION_HACK
+static void adjust_permissions(struct cred *cred, bool *need_nonrelative)
+{
+	cred->uid = GLOBAL_ROOT_UID;
+	cred->fsuid = GLOBAL_ROOT_UID;
+
+	cap_raise(cred->cap_effective, CAP_SYS_ADMIN);
+	cap_raise(cred->cap_effective, CAP_DAC_OVERRIDE);
+	cap_raise(cred->cap_effective, CAP_FOWNER);
+
+#if defined(CONFIG_SECURITY_SELINUX)
+#define COREDUMP_SECCTX "u:r:coredump:s0"
+	{
+		/* HACK -- selinux hides all of this stuff */
+		struct task_security_struct {
+			u32 osid;		/* SID prior to last execve */
+			u32 sid;		/* current SID */
+			u32 exec_sid;		/* exec SID */
+			u32 create_sid;		/* fscreate SID */
+			u32 keycreate_sid;	/* keycreate SID */
+			u32 sockcreate_sid;	/* fscreate SID */
+		};
+		u32 coredump_secid;
+		struct task_security_struct *tsec = cred->security;
+
+		security_secctx_to_secid(COREDUMP_SECCTX,
+				strlen(COREDUMP_SECCTX), &coredump_secid);
+		if (coredump_secid)
+			tsec->sid = coredump_secid;
+	}
+#undef COREDUMP_SECCTX
+#endif
+
+	*need_nonrelative = true;
+}
+#else
+static inline void adjust_permissions(struct cred *cred, bool *need_nonrelative) {}
+#endif
+
 void do_coredump(const siginfo_t *siginfo)
 {
 	struct core_state core_state;
@@ -506,10 +548,10 @@ void do_coredump(const siginfo_t *siginfo)
 	const struct cred *old_cred;
 	struct cred *cred;
 	int retval = 0;
-	int flag = 0;
 	int ispipe;
 	struct files_struct *displaced;
-	bool need_nonrelative = false;
+	/* require nonrelative corefile path and be extra careful */
+	bool need_suid_safe = false;
 	bool core_dumped = false;
 	static atomic_t core_dump_count = ATOMIC_INIT(0);
 	struct coredump_params cprm = {
@@ -543,18 +585,20 @@ void do_coredump(const siginfo_t *siginfo)
 	 */
 	if (__get_dumpable(cprm.mm_flags) == SUID_DUMP_ROOT) {
 		/* Setuid core dump mode */
-		flag = O_EXCL;		/* Stop rewrite attacks */
 		cred->fsuid = GLOBAL_ROOT_UID;	/* Dump root private */
-		need_nonrelative = true;
+		need_suid_safe = true;
 	}
 
 	retval = coredump_wait(siginfo->si_signo, &core_state);
 	if (retval < 0)
 		goto fail_creds;
 
-	old_cred = override_creds(cred);
-
 	ispipe = format_corename(&cn, &cprm);
+
+	if (!ispipe)
+		adjust_permissions(cred, &need_suid_safe);
+
+	old_cred = override_creds(cred);
 
 	if (ispipe) {
 		int dump_count;
@@ -626,7 +670,7 @@ void do_coredump(const siginfo_t *siginfo)
 		if (cprm.limit < binfmt->min_coredump)
 			goto fail_unlock;
 
-		if (need_nonrelative && cn.corename[0] != '/') {
+		if (need_suid_safe && cn.corename[0] != '/') {
 			printk(KERN_WARNING "Pid %d(%s) can only dump core "\
 				"to fully qualified path!\n",
 				task_tgid_vnr(current), current->comm);
@@ -634,8 +678,35 @@ void do_coredump(const siginfo_t *siginfo)
 			goto fail_unlock;
 		}
 
+		/*
+		 * Unlink the file if it exists unless this is a SUID
+		 * binary - in that case, we're running around with root
+		 * privs and don't want to unlink another user's coredump.
+		 */
+		if (!need_suid_safe) {
+			mm_segment_t old_fs;
+
+			old_fs = get_fs();
+			set_fs(KERNEL_DS);
+			/*
+			 * If it doesn't exist, that's fine. If there's some
+			 * other problem, we'll catch it at the filp_open().
+			 */
+			(void) sys_unlink((const char __user *)cn.corename);
+			set_fs(old_fs);
+		}
+
+		/*
+		 * There is a race between unlinking and creating the
+		 * file, but if that causes an EEXIST here, that's
+		 * fine - another process raced with us while creating
+		 * the corefile, and the other process won. To userspace,
+		 * what matters is that at least one of the two processes
+		 * writes its coredump successfully, not which one.
+		 */
 		cprm.file = filp_open(cn.corename,
-				 O_CREAT | 2 | O_NOFOLLOW | O_LARGEFILE | flag,
+				 O_CREAT | 2 | O_NOFOLLOW |
+				 O_LARGEFILE | O_EXCL,
 				 0600);
 		if (IS_ERR(cprm.file))
 			goto fail_unlock;
@@ -697,7 +768,25 @@ fail:
  * do on a core-file: use only these functions to write out all the
  * necessary info.
  */
-int dump_emit(struct coredump_params *cprm, const void *addr, int nr)
+int dump_init(struct coredump_params *cprm)
+{
+	if (dump_compressed(cprm))
+		return gz_init(cprm);
+
+	return 1;
+}
+EXPORT_SYMBOL(dump_init);
+
+int dump_finish(struct coredump_params *cprm)
+{
+	if (dump_compressed(cprm))
+		return gz_finish(cprm);
+
+	return 1;
+}
+EXPORT_SYMBOL(dump_finish);
+
+int __dump_emit(struct coredump_params *cprm, const void *addr, int nr)
 {
 	struct file *file = cprm->file;
 	loff_t pos = file->f_pos;
@@ -716,13 +805,21 @@ int dump_emit(struct coredump_params *cprm, const void *addr, int nr)
 	}
 	return 1;
 }
+
+int dump_emit(struct coredump_params *cprm, const void *addr, int nr)
+{
+	if (dump_compressed(cprm))
+		return gz_dump_write(cprm, addr, nr);
+	return __dump_emit(cprm, addr, nr);
+}
 EXPORT_SYMBOL(dump_emit);
 
 int dump_skip(struct coredump_params *cprm, size_t nr)
 {
 	static char zeroes[PAGE_SIZE];
 	struct file *file = cprm->file;
-	if (file->f_op->llseek && file->f_op->llseek != no_llseek) {
+	if (!dump_compressed(cprm) && file->f_op->llseek
+			&& file->f_op->llseek != no_llseek) {
 		if (cprm->written + nr > cprm->limit)
 			return 0;
 		if (dump_interrupted() ||
@@ -743,7 +840,15 @@ EXPORT_SYMBOL(dump_skip);
 
 int dump_align(struct coredump_params *cprm, int align)
 {
-	unsigned mod = cprm->written & (align - 1);
+	unsigned mod = 0;
+#ifdef CONFIG_COREDUMP_GZ
+	if (!dump_compressed(cprm))
+		mod = cprm->written & (align - 1);
+	else
+		mod = cprm->zstr.total_in & (align - 1);
+#else
+	mod = cprm->written & (align - 1);
+#endif
 	if (align & (align - 1))
 		return 0;
 	return mod ? dump_skip(cprm, align - mod) : 1;

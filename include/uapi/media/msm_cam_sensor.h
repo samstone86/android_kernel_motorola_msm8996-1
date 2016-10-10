@@ -257,6 +257,7 @@ enum eeprom_cfg_type_t {
 	CFG_EEPROM_WRITE_DATA,
 	CFG_EEPROM_GET_MM_INFO,
 	CFG_EEPROM_INIT,
+	CFG_EEPROM_REINIT
 };
 
 struct eeprom_get_t {
@@ -353,6 +354,7 @@ enum msm_ois_cfg_type_t {
 enum msm_ois_i2c_operation {
 	MSM_OIS_WRITE = 0,
 	MSM_OIS_POLL,
+	MSM_OIS_READ,
 };
 
 struct reg_settings_ois_t {
@@ -387,6 +389,11 @@ struct msm_actuator_move_params_t {
 	struct damping_params_t *ringing_params;
 };
 
+struct msm_mot_actuator_tuning_params_t {
+	int16_t infinity_dac;
+	int16_t macro_dac;
+};
+
 struct msm_actuator_tuning_params_t {
 	int16_t initial_code;
 	uint16_t pwd_step;
@@ -419,6 +426,7 @@ struct msm_actuator_params_t {
 struct msm_actuator_set_info_t {
 	struct msm_actuator_params_t actuator_params;
 	struct msm_actuator_tuning_params_t af_tuning_params;
+	struct msm_mot_actuator_tuning_params_t mot_af_tuning_params;
 };
 
 struct msm_actuator_get_info_t {
@@ -505,6 +513,7 @@ struct msm_flash_cfg_data_t {
 	union {
 		struct msm_flash_init_info_t *flash_init_info;
 		struct msm_camera_i2c_reg_setting_array *settings;
+		struct msm_camera_i2c_read_config *read_config;
 	} cfg;
 };
 

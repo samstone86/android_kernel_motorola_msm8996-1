@@ -203,6 +203,8 @@ struct input_keymap_entry {
 #define SYN_CONFIG		1
 #define SYN_MT_REPORT		2
 #define SYN_DROPPED		3
+#define SYN_TIME_SEC		4
+#define SYN_TIME_NSEC		5
 #define SYN_MAX			0xf
 #define SYN_CNT			(SYN_MAX+1)
 
@@ -962,6 +964,7 @@ struct input_keymap_entry {
 #define BUS_HIL			0x04
 #define BUS_BLUETOOTH		0x05
 #define BUS_VIRTUAL		0x06
+#define BUS_GREYBUS		0x07
 
 #define BUS_ISA			0x10
 #define BUS_I8042		0x11

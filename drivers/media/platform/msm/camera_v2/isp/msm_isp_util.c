@@ -26,6 +26,7 @@ static DEFINE_MUTEX(bandwidth_mgr_mutex);
 static struct msm_isp_bandwidth_mgr isp_bandwidth_mgr;
 
 static uint64_t msm_isp_cpp_clk_rate;
+static struct dump_ping_pong_state dump_data;
 
 #define VFE40_8974V2_VERSION 0x1001001A
 static struct msm_bus_vectors msm_isp_init_vectors[] = {
@@ -309,7 +310,7 @@ int msm_isp_get_clk_info(struct vfe_device *vfe_dev,
 void msm_isp_get_timestamp(struct msm_isp_timestamp *time_stamp)
 {
 	struct timespec ts;
-	get_monotonic_boottime(&ts);
+	ktime_get_ts(&ts);
 	time_stamp->buf_time.tv_sec    = ts.tv_sec;
 	time_stamp->buf_time.tv_usec   = ts.tv_nsec/1000;
 	do_gettimeofday(&(time_stamp->event_time));
@@ -846,8 +847,10 @@ static int msm_isp_proc_cmd_list_unlocked(struct vfe_device *vfe_dev, void *arg)
 		}
 
 		rc = msm_isp_proc_cmd(vfe_dev, &cmd_next.cfg_cmd);
-		if (rc < 0)
+		if (rc < 0) {
 			pr_err("%s:%d failed: rc %d", __func__, __LINE__, rc);
+			break;
+		}
 
 		cmd = cmd_next;
 	}
@@ -1206,8 +1209,9 @@ static int msm_isp_send_hw_cmd(struct vfe_device *vfe_dev,
 			(UINT_MAX - reg_cfg_cmd->u.rw_info.len)) ||
 			((reg_cfg_cmd->u.rw_info.reg_offset +
 			reg_cfg_cmd->u.rw_info.len) >
-			resource_size(vfe_dev->vfe_mem))) {
-			pr_err("%s:%d reg_offset %d len %d res %d\n",
+			resource_size(vfe_dev->vfe_mem)) ||
+			(reg_cfg_cmd->u.rw_info.reg_offset & 0x3)) {
+			pr_err_ratelimited("%s:%d reg_offset %d len %d res %d\n",
 				__func__, __LINE__,
 				reg_cfg_cmd->u.rw_info.reg_offset,
 				reg_cfg_cmd->u.rw_info.len,
@@ -1219,7 +1223,7 @@ static int msm_isp_send_hw_cmd(struct vfe_device *vfe_dev,
 			(UINT_MAX - reg_cfg_cmd->u.rw_info.len)) ||
 			((reg_cfg_cmd->u.rw_info.cmd_data_offset +
 			reg_cfg_cmd->u.rw_info.len) > cmd_len)) {
-			pr_err("%s:%d cmd_data_offset %d len %d cmd_len %d\n",
+                        pr_err_ratelimited("%s:%d cmd_data_offset %d len %d cmd_len %d\n",
 				__func__, __LINE__,
 				reg_cfg_cmd->u.rw_info.cmd_data_offset,
 				reg_cfg_cmd->u.rw_info.len, cmd_len);
@@ -1306,7 +1310,8 @@ static int msm_isp_send_hw_cmd(struct vfe_device *vfe_dev,
 			reg_cfg_cmd->u.mask_info.reg_offset) ||
 			(resource_size(vfe_dev->vfe_mem) <
 			reg_cfg_cmd->u.mask_info.reg_offset +
-			sizeof(temp))) {
+			sizeof(temp)) ||
+			(reg_cfg_cmd->u.mask_info.reg_offset & 0x3)) {
 			pr_err("%s: VFE_CFG_MASK: Invalid length\n", __func__);
 			return -EINVAL;
 		}
@@ -1613,6 +1618,14 @@ int msm_isp_cal_word_per_line(uint32_t output_format,
 	case V4L2_PIX_FMT_SGRBG10:
 	case V4L2_PIX_FMT_SRGGB10:
 	case V4L2_PIX_FMT_Y10:
+	case V4L2_PIX_FMT_SBGGR10DPCM6:
+	case V4L2_PIX_FMT_SGBRG10DPCM6:
+	case V4L2_PIX_FMT_SGRBG10DPCM6:
+	case V4L2_PIX_FMT_SRGGB10DPCM6:
+	case V4L2_PIX_FMT_SBGGR10DPCM8:
+	case V4L2_PIX_FMT_SGBRG10DPCM8:
+	case V4L2_PIX_FMT_SGRBG10DPCM8:
+	case V4L2_PIX_FMT_SRGGB10DPCM8:
 		val = CAL_WORD(pixel_per_line, 5, 32);
 		break;
 	case V4L2_PIX_FMT_SBGGR12:
@@ -1690,6 +1703,14 @@ enum msm_isp_pack_fmt msm_isp_get_pack_format(uint32_t output_format)
 	case V4L2_PIX_FMT_SGBRG10:
 	case V4L2_PIX_FMT_SGRBG10:
 	case V4L2_PIX_FMT_SRGGB10:
+	case V4L2_PIX_FMT_SBGGR10DPCM6:
+	case V4L2_PIX_FMT_SGBRG10DPCM6:
+	case V4L2_PIX_FMT_SGRBG10DPCM6:
+	case V4L2_PIX_FMT_SRGGB10DPCM6:
+	case V4L2_PIX_FMT_SBGGR10DPCM8:
+	case V4L2_PIX_FMT_SGBRG10DPCM8:
+	case V4L2_PIX_FMT_SGRBG10DPCM8:
+	case V4L2_PIX_FMT_SRGGB10DPCM8:
 	case V4L2_PIX_FMT_SBGGR12:
 	case V4L2_PIX_FMT_SGBRG12:
 	case V4L2_PIX_FMT_SGRBG12:
@@ -1777,6 +1798,14 @@ int msm_isp_get_bit_per_pixel(uint32_t output_format)
 	case V4L2_PIX_FMT_SGBRG10:
 	case V4L2_PIX_FMT_SGRBG10:
 	case V4L2_PIX_FMT_SRGGB10:
+	case V4L2_PIX_FMT_SBGGR10DPCM6:
+	case V4L2_PIX_FMT_SGBRG10DPCM6:
+	case V4L2_PIX_FMT_SGRBG10DPCM6:
+	case V4L2_PIX_FMT_SRGGB10DPCM6:
+	case V4L2_PIX_FMT_SBGGR10DPCM8:
+	case V4L2_PIX_FMT_SGBRG10DPCM8:
+	case V4L2_PIX_FMT_SGRBG10DPCM8:
+	case V4L2_PIX_FMT_SRGGB10DPCM8:
 	case V4L2_PIX_FMT_QBGGR10:
 	case V4L2_PIX_FMT_QGBRG10:
 	case V4L2_PIX_FMT_QGRBG10:
@@ -1948,7 +1977,8 @@ void msm_isp_reset_burst_count_and_frame_drop(
 }
 
 static void msm_isp_enqueue_tasklet_cmd(struct vfe_device *vfe_dev,
-	uint32_t irq_status0, uint32_t irq_status1)
+	uint32_t irq_status0, uint32_t irq_status1,
+	uint32_t ping_pong_status)
 {
 	unsigned long flags;
 	struct msm_vfe_tasklet_queue_cmd *queue_cmd = NULL;
@@ -1964,6 +1994,7 @@ static void msm_isp_enqueue_tasklet_cmd(struct vfe_device *vfe_dev,
 	}
 	queue_cmd->vfeInterruptStatus0 = irq_status0;
 	queue_cmd->vfeInterruptStatus1 = irq_status1;
+	queue_cmd->vfePingPongStatus = ping_pong_status;
 	msm_isp_get_timestamp(&queue_cmd->ts);
 	queue_cmd->cmd_used = 1;
 	vfe_dev->taskletq_idx = (vfe_dev->taskletq_idx + 1) %
@@ -1976,7 +2007,7 @@ static void msm_isp_enqueue_tasklet_cmd(struct vfe_device *vfe_dev,
 irqreturn_t msm_isp_process_irq(int irq_num, void *data)
 {
 	struct vfe_device *vfe_dev = (struct vfe_device *) data;
-	uint32_t irq_status0, irq_status1;
+	uint32_t irq_status0, irq_status1, ping_pong_status;
 	uint32_t error_mask0, error_mask1;
 
 	vfe_dev->hw_info->vfe_ops.irq_ops.
@@ -1987,7 +2018,8 @@ irqreturn_t msm_isp_process_irq(int irq_num, void *data)
 			__func__, vfe_dev->pdev->id);
 		return IRQ_HANDLED;
 	}
-
+	ping_pong_status = vfe_dev->hw_info->vfe_ops.axi_ops.
+		get_pingpong_status(vfe_dev);
 	msm_isp_process_overflow_irq(vfe_dev,
 		&irq_status0, &irq_status1);
 
@@ -2007,11 +2039,74 @@ irqreturn_t msm_isp_process_irq(int irq_num, void *data)
 		return IRQ_HANDLED;
 	}
 
-	msm_isp_enqueue_tasklet_cmd(vfe_dev, irq_status0, irq_status1);
+	if (vfe_dev->is_split) {
+		if ((vfe_dev->common_data->dual_vfe_res->vfe_dev[
+			!vfe_dev->pdev->id]) &&
+			(vfe_dev->common_data->dual_vfe_res->vfe_dev[
+				!vfe_dev->pdev->id]->vfe_open_cnt)){
+			dump_data.arr[dump_data.first].current_vfe_irq.
+			vfe_id = vfe_dev->pdev->id;
+			dump_data.arr[dump_data.first].current_vfe_irq.
+			irq_status0 = irq_status0;
+			dump_data.arr[dump_data.first].current_vfe_irq.
+			irq_status1 = irq_status1;
+			dump_data.arr[dump_data.first].current_vfe_irq.
+			ping_pong_status = ping_pong_status;
+
+			dump_data.arr[dump_data.first].other_vfe.
+			vfe_id = (!vfe_dev->pdev->id);
+			dump_data.arr[dump_data.first].other_vfe.irq_status0 =
+			msm_camera_io_r(vfe_dev->common_data->dual_vfe_res->vfe_base[
+			!vfe_dev->pdev->id] + 0x38);
+			dump_data.arr[dump_data.first].other_vfe.irq_status1 =
+			msm_camera_io_r(vfe_dev->common_data->dual_vfe_res->vfe_base[
+				!vfe_dev->pdev->id] + 0x3C);
+			dump_data.arr[dump_data.first].other_vfe.ping_pong_status =
+			msm_camera_io_r(vfe_dev->common_data->dual_vfe_res->vfe_base[
+			!vfe_dev->pdev->id] + 0x268);
+			msm_isp_get_timestamp(&dump_data.arr[dump_data.first].
+			other_vfe.ts);
+
+			dump_data.first =
+				(dump_data.first+1)%MAX_ISP_PING_PONG_DUMP_SIZE;
+			dump_data.fill_count++;
+		}
+	}
+
+	msm_isp_enqueue_tasklet_cmd(vfe_dev, irq_status0, irq_status1,
+					ping_pong_status);
 
 	return IRQ_HANDLED;
 }
+void msm_isp_dump_ping_pong_mismatch(void)
+{
+	int index, count;
 
+	index = dump_data.first-1;
+	if (dump_data.fill_count > MAX_ISP_PING_PONG_DUMP_SIZE)
+		count = MAX_ISP_PING_PONG_DUMP_SIZE-1;
+	else
+		count = dump_data.first;
+	while (count >= 0) {
+		pr_err("vfe_id %d:  irq_status0  0x%.8x:  irq_status1  0x%.8x:"
+		"  ping_pong_status  0x%.8x: ****** othervfe  %d :   "
+		"irq_status0  0x%.8x:  irq_status1  0x%.8x:   "
+		"ping_pong_status  0x%.8x:   timestamp  %u:%u\n",
+		dump_data.arr[index].current_vfe_irq.vfe_id,
+		dump_data.arr[index].current_vfe_irq.irq_status0,
+		dump_data.arr[index].current_vfe_irq.irq_status1,
+		dump_data.arr[index].current_vfe_irq.ping_pong_status,
+		dump_data.arr[index].other_vfe.vfe_id,
+		dump_data.arr[index].other_vfe.irq_status0,
+		dump_data.arr[index].other_vfe.irq_status1,
+		dump_data.arr[index].other_vfe.ping_pong_status,
+		(uint32_t)dump_data.arr[index].other_vfe.ts.buf_time.tv_sec,
+		(uint32_t)dump_data.arr[index].other_vfe.ts.buf_time.tv_usec);
+
+		index = (index+1)%MAX_ISP_PING_PONG_DUMP_SIZE;
+		count--;
+	}
+}
 void msm_isp_do_tasklet(unsigned long data)
 {
 	unsigned long flags;
@@ -2019,7 +2114,7 @@ void msm_isp_do_tasklet(unsigned long data)
 	struct msm_vfe_irq_ops *irq_ops = &vfe_dev->hw_info->vfe_ops.irq_ops;
 	struct msm_vfe_tasklet_queue_cmd *queue_cmd;
 	struct msm_isp_timestamp ts;
-	uint32_t irq_status0, irq_status1;
+	uint32_t irq_status0, irq_status1, pingpong_status;
 
 	if (vfe_dev->vfe_base == NULL || vfe_dev->vfe_open_cnt == 0) {
 		ISP_DBG("%s: VFE%d open cnt = %d, device closed(base = %pK)\n",
@@ -2042,6 +2137,7 @@ void msm_isp_do_tasklet(unsigned long data)
 		queue_cmd->cmd_used = 0;
 		irq_status0 = queue_cmd->vfeInterruptStatus0;
 		irq_status1 = queue_cmd->vfeInterruptStatus1;
+		pingpong_status = queue_cmd->vfePingPongStatus;
 		ts = queue_cmd->ts;
 		spin_unlock_irqrestore(&vfe_dev->tasklet_lock, flags);
 		ISP_DBG("%s: vfe_id %d status0: 0x%x status1: 0x%x\n",
@@ -2058,9 +2154,11 @@ void msm_isp_do_tasklet(unsigned long data)
 		}
 		msm_isp_process_error_info(vfe_dev);
 		irq_ops->process_stats_irq(vfe_dev,
-			irq_status0, irq_status1, &ts);
+			irq_status0, irq_status1,
+			pingpong_status, &ts);
 		irq_ops->process_axi_irq(vfe_dev,
-			irq_status0, irq_status1, &ts);
+			irq_status0, irq_status1,
+			pingpong_status, &ts);
 		irq_ops->process_camif_irq(vfe_dev,
 			irq_status0, irq_status1, &ts);
 		irq_ops->process_reg_update(vfe_dev,

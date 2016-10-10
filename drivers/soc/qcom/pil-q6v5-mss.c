@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -35,6 +35,8 @@
 #include "peripheral-loader.h"
 #include "pil-q6v5.h"
 #include "pil-msa.h"
+#include "mmi-unit-info.h"
+#include <soc/qcom/bootinfo.h>
 
 #define MAX_VDD_MSS_UV		1150000
 #define PROXY_TIMEOUT_MS	10000
@@ -43,10 +45,16 @@
 
 #define subsys_to_drv(d) container_of(d, struct modem_data, subsys_desc)
 
+static char pil_ssr_reason[MAX_SSR_REASON_LEN];
+static char *ssr_reason = pil_ssr_reason;
+module_param(ssr_reason, charp, S_IRUGO);
+
 static void log_modem_sfr(void)
 {
 	u32 size;
-	char *smem_reason, reason[MAX_SSR_REASON_LEN];
+	char *smem_reason;
+
+	mmi_set_pureason(PU_REASON_MODEM_RESET);
 
 	smem_reason = smem_get_entry_no_rlock(SMEM_SSR_REASON_MSS0, &size, 0,
 							SMEM_ANY_HOST_FLAG);
@@ -59,8 +67,8 @@ static void log_modem_sfr(void)
 		return;
 	}
 
-	strlcpy(reason, smem_reason, min(size, MAX_SSR_REASON_LEN));
-	pr_err("modem subsystem failure reason: %s.\n", reason);
+	strlcpy(pil_ssr_reason, smem_reason, min((size_t)size, sizeof(pil_ssr_reason)));
+	pr_err("modem subsystem failure reason: %s.\n", pil_ssr_reason);
 
 	smem_reason[0] = '\0';
 	wmb();
@@ -326,6 +334,14 @@ static int pil_mss_loadable_init(struct modem_data *drv,
 	q6->rom_clk = devm_clk_get(&pdev->dev, "mem_clk");
 	if (IS_ERR(q6->rom_clk))
 		return PTR_ERR(q6->rom_clk);
+
+	ret = of_property_read_u32(pdev->dev.of_node,
+					"qcom,pas-id", &drv->pas_id);
+	if (ret)
+		dev_warn(&pdev->dev, "Failed to find the pas_id.\n");
+
+	drv->subsys_desc.pil_mss_memsetup =
+	of_property_read_bool(pdev->dev.of_node, "qcom,pil-mss-memsetup");
 
 	/* Optional. */
 	if (of_property_match_string(pdev->dev.of_node,

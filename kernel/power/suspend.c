@@ -41,6 +41,34 @@ static const struct platform_freeze_ops *freeze_ops;
 static DECLARE_WAIT_QUEUE_HEAD(suspend_freeze_wait_head);
 static bool suspend_freeze_wake;
 
+#ifdef CONFIG_SUSPEND_WATCHDOG
+static void suspend_watchdog_handler(unsigned long data);
+static DEFINE_TIMER(wd_timer, suspend_watchdog_handler, 0, 0);
+
+static void suspend_watchdog_handler(unsigned long data)
+{
+        struct task_struct *tsk = (struct task_struct *)data;
+
+        pr_err("**** suspend timeout ****\n");
+        show_stack(tsk, NULL);
+        panic("suspend timeout triggered panic\n");
+}
+
+static void suspend_watchdog_set(void)
+{
+	wd_timer.data = (unsigned long)current;
+	mod_timer(&wd_timer, jiffies + HZ * CONFIG_SUSPEND_WATCHDOG_TIMEOUT);
+}
+
+static void suspend_watchdog_clear(void)
+{
+	del_timer_sync(&wd_timer);
+}
+#else
+#define suspend_watchdog_set()		do {} while (0)
+#define suspend_watchdog_clear()	do {} while (0)
+#endif
+
 void freeze_set_ops(const struct platform_freeze_ops *ops)
 {
 	lock_system_sleep();
@@ -463,14 +491,18 @@ static int enter_state(suspend_state_t state)
 	if (state == PM_SUSPEND_FREEZE)
 		freeze_begin();
 
+#ifdef CONFIG_PM_SYNC_BEFORE_SUSPEND
 	trace_suspend_resume(TPS("sync_filesystems"), 0, true);
 	printk(KERN_INFO "PM: Syncing filesystems ... ");
 	sys_sync();
 	printk("done.\n");
 	trace_suspend_resume(TPS("sync_filesystems"), 0, false);
+#endif
 
 	pr_debug("PM: Preparing system for %s sleep\n", pm_states[state]);
+	suspend_watchdog_set();
 	error = suspend_prepare(state);
+	suspend_watchdog_clear();
 	if (error)
 		goto Unlock;
 
@@ -485,7 +517,9 @@ static int enter_state(suspend_state_t state)
 
  Finish:
 	pr_debug("PM: Finishing wakeup.\n");
+	suspend_watchdog_set();
 	suspend_finish();
+	suspend_watchdog_clear();
  Unlock:
 	mutex_unlock(&pm_mutex);
 	return error;

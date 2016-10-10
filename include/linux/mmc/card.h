@@ -68,6 +68,12 @@ struct mmc_ext_csd {
 	unsigned int		generic_cmd6_time;	/* Units: 10ms */
 	unsigned int            power_off_longtime;     /* Units: ms */
 	u8			power_off_notification;	/* state */
+	u32			drv_type;		/* eMMC Driver type */
+#define MMC_DRIVER_TYPE_0	0x01
+#define MMC_DRIVER_TYPE_1	0x02
+#define MMC_DRIVER_TYPE_2	0x04
+#define MMC_DRIVER_TYPE_3	0x08
+#define MMC_DRIVER_TYPE_4	0x10
 	unsigned int		hs_max_dtr;
 	unsigned int		hs200_max_dtr;
 #define MMC_HIGH_26_MAX_DTR	26000000
@@ -87,6 +93,8 @@ struct mmc_ext_csd {
 	bool			hpi_en;			/* HPI enablebit */
 	bool			hpi;			/* HPI support bit */
 	unsigned int		hpi_cmd;		/* cmd used as HPI */
+	bool			ffu_capable;		/* FFU support */
+	bool			ffu_mode_op;		/* FFU mode operation */
 	bool			bkops;		/* background support bit */
 	u8			bkops_en;	/* background enable */
 	unsigned int            data_sector_size;       /* 512 bytes or 4KB */
@@ -479,6 +487,7 @@ struct mmc_fixup {
 #define CID_MANFID_MICRON	0x13
 #define CID_MANFID_SAMSUNG	0x15
 #define CID_MANFID_KINGSTON	0x70
+#define CID_MANFID_HYNIX	0x90
 
 #define CID_MANFID_ANY (-1u)
 #define CID_OEMID_ANY ((unsigned short) -1)

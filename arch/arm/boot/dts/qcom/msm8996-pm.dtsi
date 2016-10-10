@@ -11,6 +11,7 @@
  */
 
 #include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/msm/pm.h>
 
 &soc {
 	qcom,spm@9A10000 {
@@ -63,6 +64,7 @@
 				qcom,energy-overhead = <69000>;
 				qcom,time-overhead = <150>;
 				qcom,min-child-idx = <1>;
+				qcom,reset-level = <LPM_RESET_LVL_RET>;
 			};
 			qcom,pm-cluster-level@2{ /* E4-M3 */
 				reg = <1>;
@@ -77,6 +79,7 @@
 				qcom,min-child-idx = <2>;
 				qcom,notify-rpm;
 				qcom,is-reset;
+				qcom,reset-level = <LPM_RESET_LVL_PC>;
 			};
 
 			qcom,pm-cluster@0{
@@ -109,6 +112,7 @@
 					qcom,energy-overhead = <89070>;
 					qcom,time-overhead = <180>;
 					qcom,min-child-idx = <2>;
+					qcom,reset-level = <LPM_RESET_LVL_GDHS>;
 				};
 
 				qcom,pm-cluster-level@2{ /* D4 */
@@ -121,6 +125,7 @@
 					qcom,time-overhead = <1000>;
 					qcom,min-child-idx = <2>;
 					qcom,is-reset;
+					qcom,reset-level = <LPM_RESET_LVL_PC>;
 				};
 
 				qcom,pm-cpu {
@@ -158,6 +163,8 @@
 						qcom,ss-power = <196>;
 						qcom,energy-overhead = <45300>;
 						qcom,time-overhead = <210>;
+						qcom,reset-level =
+							<LPM_RESET_LVL_PC>;
 					};
 				};
 			};
@@ -192,6 +199,8 @@
 					qcom,energy-overhead = <83500>;
 					qcom,time-overhead = <180>;
 					qcom,min-child-idx = <2>;
+					qcom,reset-level =
+						<LPM_RESET_LVL_GDHS>;
 				};
 
 				qcom,pm-cluster-level@2{ /* D4 */
@@ -204,6 +213,8 @@
 					qcom,time-overhead = <1000>;
 					qcom,min-child-idx = <2>;
 					qcom,is-reset;
+					qcom,reset-level =
+						<LPM_RESET_LVL_PC>;
 				};
 
 				qcom,pm-cpu {
@@ -241,6 +252,8 @@
 						qcom,ss-power = <196>;
 						qcom,energy-overhead = <45300>;
 						qcom,time-overhead = <210>;
+						qcom,reset-level =
+							<LPM_RESET_LVL_PC>;
 					};
 				};
 			};
@@ -311,9 +324,12 @@
 			<0xff 115>, /* mdss_irq */
 			<0xff 126>, /* bam_irq[0] */
 			<0xff 127>, /* blsp1_qup_irq(0) */
+			<0xff 129>, /* blsp1_qup_irq(2) */
+			<0xff 131>, /* blsp1_qup_irq(4) */
 			<0xff 132>, /* blsp1_qup_irq(5) */
 			<0xff 133>, /* blsp2_qup_irq(0) */
 			<0xff 134>, /* blsp2_qup_irq(1) */
+			<0xff 135>, /* blsp2_qup_irq(2) */
 			<0xff 138>, /* blsp2_qup_irq(5) */
 			<0xff 140>, /* blsp1_uart_irq(1) */
 			<0xff 146>, /* blsp2_uart_irq(1) */
@@ -324,6 +340,8 @@
 			<0xff 165>, /* usb30_hs_phy_irq */
 			<0xff 166>, /* sdc1_pwr_cmd_irq */
 			<0xff 170>, /* sdcc_pwr_cmd_irq */
+			<0xff 171>, /* USB2 msm_hs_phy_irq */
+			<0xff 172>, /* USB2 msm_dwc3 */
 			<0xff 173>, /* sdc1_irq[0] */
 			<0xff 174>, /* o_wcss_apss_smd_med */
 			<0xff 175>, /* o_wcss_apss_smd_low */
@@ -365,7 +383,6 @@
 			<0xff 268>, /* bam_irq[1] */
 			<0xff 270>, /* bam_irq[0] */
 			<0xff 271>, /* bam_irq[0] */
-			<0xff 276>, /* wlan_pci */
 			<0xff 283>, /* pcie20_0_int_pls_err */
 			<0xff 284>, /* pcie20_0_int_aer_legacy */
 			<0xff 286>, /* pcie20_0_int_pls_link_down */
@@ -375,6 +392,7 @@
 			<0xff 296>, /* camss_cpp_mmu_pmirpt */
 			<0xff 297>, /* ufs_intrq */
 			<0xff 302>, /* qdss_etrbytecnt_irq */
+			<0xff 304>, /* wlan_pci */
 			<0xff 310>, /* pcie20_1_int_pls_err */
 			<0xff 311>, /* pcie20_1_int_aer_legacy */
 			<0xff 313>, /* pcie20_1_int_pls_link_down */

@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -303,6 +303,12 @@
 	qcom,cpr-enable;
 
 	/delete-property/ qcom,cpr-aging-ref-voltage;
+	/delete-property/ mem-acc-supply;
+	/delete-property/ qcom,mem-acc-voltage;
+};
+
+&gfx_mem_acc_vreg {
+	status = "disabled";
 };
 
 &gfx_vreg {
@@ -418,6 +424,7 @@
 	/* Quirks */
 	qcom,gpu-quirk-two-pass-use-wfi;
 	qcom,gpu-quirk-iommu-sync;
+	qcom,gpu-quirk-fault-detect-mask;
 
 	/* Power levels */
 	qcom,gpu-pwrlevels {

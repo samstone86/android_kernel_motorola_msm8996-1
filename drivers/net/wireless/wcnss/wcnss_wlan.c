@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -88,6 +88,7 @@ static DEFINE_SPINLOCK(reg_spinlock);
 #define CCU_RIVA_LAST_ADDR2_OFFSET		0x10c
 
 #define PRONTO_PMU_SPARE_OFFSET       0x1088
+#define PMU_A2XB_CFG_HSPLIT_RESP_LIMIT_OFFSET	0x117C
 
 #define PRONTO_PMU_COM_GDSCR_OFFSET       0x0024
 #define PRONTO_PMU_COM_GDSCR_SW_COLLAPSE  BIT(0)
@@ -155,11 +156,6 @@ static DEFINE_SPINLOCK(reg_spinlock);
 #define PRONTO_SAW2_SPM_CTL		0x30
 #define PRONTO_SAW2_SAW2_VERSION		0xFD0
 #define PRONTO_SAW2_MAJOR_VER_OFFSET		0x1C
-#define PRONTO_SAW2_MAJOR_VER_3		0x3
-#define PRONTO_SAW2_SPM_SLP_SEQ		0x80
-#define PRONTO_SAW2_SPM_SLP_SEQ_2		0x400
-#define PRONTO_SAW2_SPM_SLP_SEQ_OFFSET		0x04
-#define PRONTO_SAW2_SPM_SLP_SEQ_COUNT		0x08
 
 #define PRONTO_PLL_STATUS_OFFSET		0x1c
 #define PRONTO_PLL_MODE_OFFSET			0x1c0
@@ -177,6 +173,7 @@ static DEFINE_SPINLOCK(reg_spinlock);
 #define MCU_FDBR_FDAHB_ERR_OFFSET		0x3a4
 #define MCU_FDBR_CDAHB_TIMEOUT_OFFSET		0x3a8
 #define MCU_FDBR_FDAHB_TIMEOUT_OFFSET		0x3ac
+#define PRONTO_PMU_CCPU_BOOT_REMAP_OFFSET	0x2004
 
 #define WCNSS_DEF_WLAN_RX_BUFF_COUNT		1024
 
@@ -193,6 +190,7 @@ static DEFINE_SPINLOCK(reg_spinlock);
 #define WCNSS_USR_SERIAL_NUM      (WCNSS_USR_CTRL_MSG_START + 1)
 #define WCNSS_USR_HAS_CAL_DATA    (WCNSS_USR_CTRL_MSG_START + 2)
 #define WCNSS_USR_WLAN_MAC_ADDR   (WCNSS_USR_CTRL_MSG_START + 3)
+#define WCNSS_USR_WLAN_NV_NAME    (WCNSS_USR_CTRL_MSG_START + 4)
 
 #define MAC_ADDRESS_STR "%02x:%02x:%02x:%02x:%02x:%02x"
 
@@ -357,6 +355,7 @@ static struct {
 	int		smd_channel_ready;
 	u32		wlan_rx_buff_count;
 	int		is_vsys_adc_channel;
+	int		is_a2xb_split_reg;
 	smd_channel_t	*smd_ch;
 	unsigned char	wcnss_version[WCNSS_VERSION_LEN];
 	unsigned char   fw_major;
@@ -424,6 +423,7 @@ static struct {
 	int pc_disabled;
 	struct delayed_work wcnss_pm_qos_del_req;
 	struct mutex pm_qos_mutex;
+	char wcnss_nv_name[WLAN_NV_NAME_SIZE];
 } *penv = NULL;
 
 static ssize_t wcnss_wlan_macaddr_store(struct device *dev,
@@ -595,8 +595,7 @@ void wcnss_pronto_is_a2xb_bus_stall(void *tst_addr, u32 fifo_mask, char *type)
 void wcnss_pronto_log_debug_regs(void)
 {
 	void __iomem *reg_addr, *tst_addr, *tst_ctrl_addr;
-	u32 reg = 0, reg2 = 0, reg3 = 0, reg4 = 0, offset_addr = 0;
-	int i;
+	u32 reg = 0, reg2 = 0, reg3 = 0, reg4 = 0;
 
 
 	reg_addr = penv->msm_wcnss_base + PRONTO_PMU_SPARE_OFFSET;
@@ -635,22 +634,21 @@ void wcnss_pronto_log_debug_regs(void)
 	reg = readl_relaxed(reg_addr);
 	pr_err("PRONTO_SAW2_SPM_CTL %08x\n", reg);
 
+	if (penv->is_a2xb_split_reg) {
+		reg_addr = penv->msm_wcnss_base +
+			   PMU_A2XB_CFG_HSPLIT_RESP_LIMIT_OFFSET;
+		reg = readl_relaxed(reg_addr);
+		pr_err("PMU_A2XB_CFG_HSPLIT_RESP_LIMIT %08x\n", reg);
+	}
+
 	reg_addr = penv->pronto_saw2_base + PRONTO_SAW2_SAW2_VERSION;
 	reg = readl_relaxed(reg_addr);
 	pr_err("PRONTO_SAW2_SAW2_VERSION %08x\n", reg);
 	reg >>= PRONTO_SAW2_MAJOR_VER_OFFSET;
 
-	if (reg >= PRONTO_SAW2_MAJOR_VER_3)
-		offset_addr = PRONTO_SAW2_SPM_SLP_SEQ_2;
-	else
-		offset_addr = PRONTO_SAW2_SPM_SLP_SEQ;
-
-	for (i = 0; i <= PRONTO_SAW2_SPM_SLP_SEQ_COUNT; i++) {
-		reg_addr = penv->pronto_saw2_base + offset_addr
-			+ (i * PRONTO_SAW2_SPM_SLP_SEQ_OFFSET);
-		reg = readl_relaxed(reg_addr);
-		pr_err("PRONTO_SAW2_SPM_SLP_SEQ_ENTRY_%d %08x\n", i, reg);
-	}
+	reg_addr = penv->msm_wcnss_base  + PRONTO_PMU_CCPU_BOOT_REMAP_OFFSET;
+	reg = readl_relaxed(reg_addr);
+	pr_err("PRONTO_PMU_CCPU_BOOT_REMAP %08x\n", reg);
 
 	reg_addr = penv->pronto_pll_base + PRONTO_PLL_STATUS_OFFSET;
 	reg = readl_relaxed(reg_addr);
@@ -2600,10 +2598,25 @@ static int wcnss_ctrl_open(struct inode *inode, struct file *file)
 	return rc;
 }
 
+int wcnss_get_wlan_nv_name(char *nv_name)
+{
+	if (!penv)
+		return -ENODEV;
+	if (penv->wcnss_nv_name[0] != 0) {
+		memcpy(nv_name, penv->wcnss_nv_name, WLAN_NV_NAME_SIZE);
+		pr_debug("%s: Get NV name: %s" "\n", __func__,
+			penv->wcnss_nv_name);
+		return 0;
+	}
+	pr_err("%s: No NV name\n", __func__);
+	return 1;
+}
+EXPORT_SYMBOL(wcnss_get_wlan_nv_name);
 
 void process_usr_ctrl_cmd(u8 *buf, size_t len)
 {
 	u16 cmd = buf[0] << 8 | buf[1];
+	s8 fname_length;
 
 	switch (cmd) {
 
@@ -2631,6 +2644,20 @@ void process_usr_ctrl_cmd(u8 *buf, size_t len)
 			penv->wlan_nv_macAddr[0], penv->wlan_nv_macAddr[1],
 			penv->wlan_nv_macAddr[2], penv->wlan_nv_macAddr[3],
 			penv->wlan_nv_macAddr[4], penv->wlan_nv_macAddr[5]);
+		break;
+	case WCNSS_USR_WLAN_NV_NAME:
+		fname_length = (buf[2] < WLAN_NV_NAME_SIZE) ?
+				buf[2]:WLAN_NV_NAME_SIZE-1;
+
+		if (fname_length < 0)
+			pr_debug("%s: Invalid filename length for filename %d\n",
+				 __func__, fname_length);
+		pr_debug("%s: fname length was %d",
+			 __func__, fname_length);
+		memcpy(penv->wcnss_nv_name, &buf[3], fname_length);
+		penv->wcnss_nv_name[WLAN_NV_NAME_SIZE-1] = 0;
+		pr_err("%s: user nv set to %s, fname length was %d",
+			__func__, penv->wcnss_nv_name, fname_length);
 		break;
 
 	default:
@@ -2727,6 +2754,9 @@ wcnss_trigger_config(struct platform_device *pdev)
 
 	penv->is_vsys_adc_channel = of_property_read_bool(pdev->dev.of_node,
 						"qcom,has-vsys-adc-channel");
+
+	penv->is_a2xb_split_reg = of_property_read_bool(pdev->dev.of_node,
+						"qcom,has-a2xb-split-reg");
 
 	if (of_property_read_u32(pdev->dev.of_node,
 			"qcom,wlan-rx-buff-count", &penv->wlan_rx_buff_count)) {
@@ -3445,6 +3475,7 @@ wcnss_wlan_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 	penv->pdev = pdev;
+	penv->wcnss_nv_name[0] = 0;
 
 	/* register sysfs entries */
 	ret = wcnss_create_sysfs(&pdev->dev);

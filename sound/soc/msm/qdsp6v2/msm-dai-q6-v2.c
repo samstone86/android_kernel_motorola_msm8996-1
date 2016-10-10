@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -36,8 +36,6 @@
 #define CHANNEL_STATUS_MASK_INIT 0x0
 #define CHANNEL_STATUS_MASK 0x4
 #define AFE_API_VERSION_CLOCK_SET 1
-#define AFE_CLK_VERSION_V1    1
-#define AFE_CLK_VERSION_V2    2
 
 static const struct afe_clk_set lpass_clk_set_default = {
 	AFE_API_VERSION_CLOCK_SET,
@@ -170,6 +168,12 @@ struct msm_dai_q6_spdif_dai_data {
 	struct afe_spdif_port_config spdif_port;
 };
 
+struct msm_dai_mi2s_pinctrl_info {
+	struct pinctrl *pinctrl;
+	struct pinctrl_state *disable;
+	struct pinctrl_state *active;
+};
+
 struct msm_dai_q6_mi2s_dai_config {
 	u16 pdata_mi2s_lines;
 	struct msm_dai_q6_dai_data mi2s_dai_data;
@@ -178,6 +182,7 @@ struct msm_dai_q6_mi2s_dai_config {
 struct msm_dai_q6_mi2s_dai_data {
 	struct msm_dai_q6_mi2s_dai_config tx_dai;
 	struct msm_dai_q6_mi2s_dai_config rx_dai;
+	struct msm_dai_mi2s_pinctrl_info pinctrl_info;
 };
 
 struct msm_dai_q6_auxpcm_dai_data {
@@ -273,7 +278,7 @@ static struct afe_clk_set tdm_clk_set = {
 	AFE_API_VERSION_CLOCK_SET,
 	Q6AFE_LPASS_CLK_ID_QUAD_TDM_EBIT,
 	Q6AFE_LPASS_IBIT_CLK_DISABLE,
-	Q6AFE_LPASS_CLK_ATTRIBUTE_COUPLE_NO,
+	Q6AFE_LPASS_CLK_ATTRIBUTE_INVERT_COUPLE_NO,
 	Q6AFE_LPASS_CLK_ROOT_DEFAULT,
 	0,
 };
@@ -1598,6 +1603,7 @@ static int msm_dai_q6_hw_params(struct snd_pcm_substream *substream,
 		break;
 	case INT_BT_SCO_RX:
 	case INT_BT_SCO_TX:
+	case INT_BT_A2DP_RX:
 	case INT_FM_RX:
 	case INT_FM_TX:
 		rc = msm_dai_q6_bt_fm_hw_params(params, dai, substream->stream);
@@ -2040,6 +2046,23 @@ static struct snd_soc_dai_driver msm_dai_q6_bt_sco_rx_dai = {
 	.remove = msm_dai_q6_dai_remove,
 };
 
+static struct snd_soc_dai_driver msm_dai_q6_bt_a2dp_rx_dai = {
+	.playback = {
+		.stream_name = "Internal BT-A2DP Playback",
+		.aif_name = "INT_BT_A2DP_RX",
+		.rates = SNDRV_PCM_RATE_48000,
+		.formats = SNDRV_PCM_FMTBIT_S16_LE,
+		.channels_min = 1,
+		.channels_max = 2,
+		.rate_max = 48000,
+		.rate_min = 48000,
+	},
+	.ops = &msm_dai_q6_ops,
+	.id = INT_BT_A2DP_RX,
+	.probe = msm_dai_q6_dai_probe,
+	.remove = msm_dai_q6_dai_remove,
+};
+
 static struct snd_soc_dai_driver msm_dai_q6_bt_sco_tx_dai = {
 	.capture = {
 		.stream_name = "Internal BT-SCO Capture",
@@ -2194,7 +2217,7 @@ static int msm_auxpcm_dev_probe(struct platform_device *pdev)
 		goto fail_pdata_nomem;
 	}
 
-	dev_dbg(&pdev->dev, "%s: dev %p, dai_data %p, auxpcm_pdata %p\n",
+	dev_dbg(&pdev->dev, "%s: dev %pK, dai_data %pK, auxpcm_pdata %pK\n",
 		__func__, &pdev->dev, dai_data, auxpcm_pdata);
 
 	rc = of_property_read_u32_array(pdev->dev.of_node,
@@ -2872,8 +2895,17 @@ static int msm_dai_q6_dai_mi2s_remove(struct snd_soc_dai *dai)
 static int msm_dai_q6_mi2s_startup(struct snd_pcm_substream *substream,
 				   struct snd_soc_dai *dai)
 {
+	int rc;
+	struct msm_dai_q6_mi2s_dai_data *mi2s_dai_data =
+		dev_get_drvdata(dai->dev);
 
-	return 0;
+	rc = pinctrl_select_state(mi2s_dai_data->pinctrl_info.pinctrl,
+					mi2s_dai_data->pinctrl_info.active);
+	if (rc)
+		dev_err(dai->dev, "%s:setting pin state to active failed %d\n",
+			__func__, rc);
+
+	return rc;
 }
 
 
@@ -3125,13 +3157,31 @@ error_invalid_data:
 
 static int msm_dai_q6_mi2s_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 {
+	int rx_port_started;
+	int tx_port_started;
 	struct msm_dai_q6_mi2s_dai_data *mi2s_dai_data =
-	dev_get_drvdata(dai->dev);
+		dev_get_drvdata(dai->dev);
 
-	if (test_bit(STATUS_PORT_STARTED,
-	    mi2s_dai_data->rx_dai.mi2s_dai_data.status_mask) ||
-	    test_bit(STATUS_PORT_STARTED,
-	    mi2s_dai_data->tx_dai.mi2s_dai_data.status_mask)) {
+	rx_port_started = test_bit(STATUS_PORT_STARTED,
+	    mi2s_dai_data->rx_dai.mi2s_dai_data.status_mask);
+	tx_port_started = test_bit(STATUS_PORT_STARTED,
+	    mi2s_dai_data->tx_dai.mi2s_dai_data.status_mask);
+	if (rx_port_started || tx_port_started) {
+		/* if port is already started but fmt is not changed don't return failure */
+		if (rx_port_started) {
+			if (((fmt & SND_SOC_DAIFMT_MASTER_MASK) == SND_SOC_DAIFMT_CBS_CFS
+				&& mi2s_dai_data->rx_dai.mi2s_dai_data.port_config.i2s.ws_src) ||
+				((fmt & SND_SOC_DAIFMT_MASTER_MASK) == SND_SOC_DAIFMT_CBS_CFM
+				&& !mi2s_dai_data->rx_dai.mi2s_dai_data.port_config.i2s.ws_src))
+					return 0;
+		}
+		if (tx_port_started) {
+			if (((fmt & SND_SOC_DAIFMT_MASTER_MASK) == SND_SOC_DAIFMT_CBS_CFS
+				&& mi2s_dai_data->tx_dai.mi2s_dai_data.port_config.i2s.ws_src) ||
+				((fmt & SND_SOC_DAIFMT_MASTER_MASK) == SND_SOC_DAIFMT_CBS_CFM
+				&& !mi2s_dai_data->tx_dai.mi2s_dai_data.port_config.i2s.ws_src))
+					return 0;
+		}
 		dev_err(dai->dev, "%s: err chg i2s mode while dai running",
 			__func__);
 		return -EPERM;
@@ -3183,6 +3233,7 @@ static void msm_dai_q6_mi2s_shutdown(struct snd_pcm_substream *substream,
 		 &mi2s_dai_data->tx_dai.mi2s_dai_data);
 	 u16 port_id = 0;
 	int rc = 0;
+	int port_started;
 
 	if (msm_mi2s_get_port_id(dai->id, substream->stream,
 				 &port_id) != 0) {
@@ -3201,6 +3252,20 @@ static void msm_dai_q6_mi2s_shutdown(struct snd_pcm_substream *substream,
 	}
 	if (test_bit(STATUS_PORT_STARTED, dai_data->hwfree_status))
 		clear_bit(STATUS_PORT_STARTED, dai_data->hwfree_status);
+
+	port_started =
+			(test_bit(STATUS_PORT_STARTED,
+				mi2s_dai_data->rx_dai.mi2s_dai_data.status_mask) |
+			test_bit(STATUS_PORT_STARTED,
+				mi2s_dai_data->tx_dai.mi2s_dai_data.status_mask));
+	if (!port_started) {
+		rc = pinctrl_select_state(mi2s_dai_data->pinctrl_info.pinctrl,
+						mi2s_dai_data->pinctrl_info.disable);
+		if (rc != 0) {
+			dev_err(dai->dev, "%s: setting pin state to disable failed %d\n",
+				__func__, rc);
+		}
+	}
 }
 
 static struct snd_soc_dai_ops msm_dai_q6_mi2s_ops = {
@@ -3219,11 +3284,12 @@ static struct snd_soc_dai_driver msm_dai_q6_mi2s_dai[] = {
 			.stream_name = "Primary MI2S Playback",
 			.aif_name = "PRI_MI2S_RX",
 			.rates = SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_8000 |
-			SNDRV_PCM_RATE_16000,
+			SNDRV_PCM_RATE_16000 | SNDRV_PCM_RATE_96000 |
+			SNDRV_PCM_RATE_192000,
 			.formats = SNDRV_PCM_FMTBIT_S16_LE |
 				SNDRV_PCM_FMTBIT_S24_LE,
 			.rate_min =     8000,
-			.rate_max =     48000,
+			.rate_max =     192000,
 		},
 		.capture = {
 			.stream_name = "Primary MI2S Capture",
@@ -3268,19 +3334,23 @@ static struct snd_soc_dai_driver msm_dai_q6_mi2s_dai[] = {
 			.stream_name = "Tertiary MI2S Playback",
 			.aif_name = "TERT_MI2S_RX",
 			.rates = SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_8000 |
-			SNDRV_PCM_RATE_16000,
-			.formats = SNDRV_PCM_FMTBIT_S16_LE,
+			SNDRV_PCM_RATE_16000 | SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_32000 |
+			SNDRV_PCM_RATE_192000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE |
+							SNDRV_PCM_FMTBIT_S24_LE,
 			.rate_min =     8000,
-			.rate_max =     48000,
+			.rate_max =     192000,
 		},
 		.capture = {
 			.stream_name = "Tertiary MI2S Capture",
 			.aif_name = "TERT_MI2S_TX",
 			.rates = SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_8000 |
-			SNDRV_PCM_RATE_16000,
-			.formats = SNDRV_PCM_FMTBIT_S16_LE,
+			SNDRV_PCM_RATE_16000 | SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_32000 |
+			SNDRV_PCM_RATE_192000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE |
+							SNDRV_PCM_FMTBIT_S24_LE,
 			.rate_min =     8000,
-			.rate_max =     48000,
+			.rate_max =     192000,
 		},
 		.ops = &msm_dai_q6_mi2s_ops,
 		.id = MSM_TERT_MI2S,
@@ -3291,20 +3361,24 @@ static struct snd_soc_dai_driver msm_dai_q6_mi2s_dai[] = {
 		.playback = {
 			.stream_name = "Quaternary MI2S Playback",
 			.aif_name = "QUAT_MI2S_RX",
-			.rates = SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_8000 |
-			SNDRV_PCM_RATE_16000,
-			.formats = SNDRV_PCM_FMTBIT_S16_LE,
+			.rates = SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |
+			SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_48000 |
+			SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_192000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE |
+							SNDRV_PCM_FMTBIT_S24_LE,
 			.rate_min =     8000,
-			.rate_max =     48000,
+			.rate_max =     192000,
 		},
 		.capture = {
 			.stream_name = "Quaternary MI2S Capture",
 			.aif_name = "QUAT_MI2S_TX",
-			.rates = SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_8000 |
-			SNDRV_PCM_RATE_16000,
-			.formats = SNDRV_PCM_FMTBIT_S16_LE,
+			.rates = SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |
+			SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_48000 |
+			SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_192000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE |
+							SNDRV_PCM_FMTBIT_S24_LE,
 			.rate_min =     8000,
-			.rate_max =     48000,
+			.rate_max =     192000,
 		},
 		.ops = &msm_dai_q6_mi2s_ops,
 		.id = MSM_QUAT_MI2S,
@@ -3495,12 +3569,51 @@ static int msm_dai_q6_mi2s_platform_data_validation(
 		dai_driver->capture.channels_max = 0;
 	}
 
+	dai_data->pinctrl_info.pinctrl = devm_pinctrl_get(&pdev->dev);
+	if (IS_ERR(dai_data->pinctrl_info.pinctrl)) {
+		dev_err(&pdev->dev, "%s: Unable to get pinctrl handle\n",
+			__func__);
+		rc = PTR_ERR(dai_data->pinctrl_info.pinctrl);
+		goto rtn;
+	}
+
+	dai_data->pinctrl_info.active = pinctrl_lookup_state(
+						dai_data->pinctrl_info.pinctrl,
+						"default");
+	if (IS_ERR(dai_data->pinctrl_info.active)) {
+		dev_err(&pdev->dev, "%s:could not get active pinstate\n",
+			__func__);
+		rc = PTR_ERR(dai_data->pinctrl_info.active);
+		goto rtn;
+	}
+
+	dai_data->pinctrl_info.disable = pinctrl_lookup_state(
+						dai_data->pinctrl_info.pinctrl,
+						"idle");
+	if (IS_ERR(dai_data->pinctrl_info.disable)) {
+		dev_err(&pdev->dev, "%s:could not get disable pinstate\n",
+			__func__);
+		rc = PTR_ERR(dai_data->pinctrl_info.disable);
+		goto rtn;
+	}
+
+	rc = pinctrl_select_state(dai_data->pinctrl_info.pinctrl,
+					dai_data->pinctrl_info.disable);
+	if (rc != 0) {
+		dev_err(&pdev->dev, "%s: select sleep disable failed %d\n",
+			__func__, rc);
+		goto rtn;
+	}
+
 	dev_dbg(&pdev->dev, "%s: playback sdline 0x%x capture sdline 0x%x\n",
 		__func__, dai_data->rx_dai.pdata_mi2s_lines,
 		dai_data->tx_dai.pdata_mi2s_lines);
 	dev_dbg(&pdev->dev, "%s: playback ch_max %d capture ch_mx %d\n",
 		__func__, dai_driver->playback.channels_max,
 		dai_driver->capture.channels_max);
+
+	return rc;
+
 rtn:
 	return rc;
 }
@@ -3603,6 +3716,9 @@ rtn:
 
 static int msm_dai_q6_mi2s_dev_remove(struct platform_device *pdev)
 {
+	struct msm_dai_q6_mi2s_dai_data *dai_data = dev_get_drvdata(&pdev->dev);
+
+	devm_pinctrl_put(dai_data->pinctrl_info.pinctrl);
 	snd_soc_unregister_component(&pdev->dev);
 	return 0;
 }
@@ -3713,6 +3829,10 @@ register_slim_capture:
 	case INT_BT_SCO_TX:
 		rc = snd_soc_register_component(&pdev->dev, &msm_dai_q6_component,
 		&msm_dai_q6_bt_sco_tx_dai, 1);
+		break;
+	case INT_BT_A2DP_RX:
+		rc = snd_soc_register_component(&pdev->dev,
+		&msm_dai_q6_component, &msm_dai_q6_bt_a2dp_rx_dai, 1);
 		break;
 	case INT_FM_RX:
 		rc = snd_soc_register_component(&pdev->dev, &msm_dai_q6_component,
@@ -3971,6 +4091,7 @@ static int msm_dai_tdm_q6_probe(struct platform_device *pdev)
 	const uint32_t *port_id_array = NULL;
 	uint32_t array_length = 0;
 	int i = 0;
+	int group_idx = 0;
 
 	/* extract tdm group info into static */
 	rc = of_property_read_u32(pdev->dev.of_node,
@@ -4040,6 +4161,16 @@ static int msm_dai_tdm_q6_probe(struct platform_device *pdev)
 	}
 	dev_dbg(&pdev->dev, "%s: Clk Rate from DT file %d\n",
 		__func__, tdm_clk_set.clk_freq_in_hz);
+
+	/* other initializations within device group */
+	group_idx = msm_dai_q6_get_group_idx(tdm_group_cfg.group_id);
+	if (group_idx < 0) {
+		dev_err(&pdev->dev, "%s: group id 0x%x not supported\n",
+			__func__, tdm_group_cfg.group_id);
+		rc = -EINVAL;
+		goto rtn;
+	}
+	atomic_set(&tdm_group_ref[group_idx], 0);
 
 	/* probe child node info */
 	rc = of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
@@ -4874,7 +5005,7 @@ static int msm_dai_q6_dai_tdm_probe(struct snd_soc_dai *dai)
 	struct snd_kcontrol *data_format_kcontrol = NULL;
 	struct snd_kcontrol *header_type_kcontrol = NULL;
 	struct snd_kcontrol *header_kcontrol = NULL;
-	int port_idx = 0, i = 0;
+	int port_idx = 0;
 	const struct snd_kcontrol_new *data_format_ctrl = NULL;
 	const struct snd_kcontrol_new *header_type_ctrl = NULL;
 	const struct snd_kcontrol_new *header_ctrl = NULL;
@@ -4942,10 +5073,6 @@ static int msm_dai_q6_dai_tdm_probe(struct snd_soc_dai *dai)
 	}
 
 	rc = msm_dai_q6_dai_add_route(dai);
-
-	/* other initializations */
-	for (i = 0; i < IDX_GROUP_TDM_MAX; i++)
-		atomic_set(&tdm_group_ref[i], 0);
 
 rtn:
 	return rc;

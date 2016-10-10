@@ -128,6 +128,7 @@ EXPORT_SYMBOL(tty_std_termios);
    into this file */
 
 LIST_HEAD(tty_drivers);			/* linked list of tty drivers */
+EXPORT_SYMBOL(tty_drivers);
 
 /* Mutex to protect creating and releasing a tty. This is shared with
    vt.c for deeply disgusting hack reasons */
@@ -152,7 +153,6 @@ static long tty_compat_ioctl(struct file *file, unsigned int cmd,
 #endif
 static int __tty_fasync(int fd, struct file *filp, int on);
 static int tty_fasync(int fd, struct file *filp, int on);
-static void release_tty(struct tty_struct *tty, int idx);
 static void __proc_set_tty(struct task_struct *tsk, struct tty_struct *tty);
 static void proc_set_tty(struct task_struct *tsk, struct tty_struct *tty);
 
@@ -1510,6 +1510,7 @@ err_release_tty:
 	release_tty(tty, idx);
 	return ERR_PTR(retval);
 }
+EXPORT_SYMBOL(tty_init_dev);
 
 void tty_free_termios(struct tty_struct *tty)
 {
@@ -1621,7 +1622,7 @@ EXPORT_SYMBOL(tty_kref_put);
  *	of ttys that the driver keeps.
  *
  */
-static void release_tty(struct tty_struct *tty, int idx)
+void release_tty(struct tty_struct *tty, int idx)
 {
 	/* This should always be true but check for the moment */
 	WARN_ON(tty->index != idx);
@@ -1639,6 +1640,7 @@ static void release_tty(struct tty_struct *tty, int idx)
 		tty_kref_put(tty->link);
 	tty_kref_put(tty);
 }
+EXPORT_SYMBOL(release_tty);
 
 /**
  *	tty_release_checks - check a tty before real release
@@ -2594,6 +2596,28 @@ static int tiocsetd(struct tty_struct *tty, int __user *p)
 }
 
 /**
+ *	tiocgetd	-	get line discipline
+ *	@tty: tty device
+ *	@p: pointer to user data
+ *
+ *	Retrieves the line discipline id directly from the ldisc.
+ *
+ *	Locking: waits for ldisc reference (in case the line discipline
+ *		is changing or the tty is being hungup)
+ */
+
+static int tiocgetd(struct tty_struct *tty, int __user *p)
+{
+	struct tty_ldisc *ld;
+	int ret;
+
+	ld = tty_ldisc_ref_wait(tty);
+	ret = put_user(ld->ops->num, p);
+	tty_ldisc_deref(ld);
+	return ret;
+}
+
+/**
  *	send_break	-	performed time break
  *	@tty: device to break on
  *	@duration: timeout in mS
@@ -2807,7 +2831,7 @@ long tty_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case TIOCGSID:
 		return tiocgsid(tty, real_tty, p);
 	case TIOCGETD:
-		return put_user(tty->ldisc->ops->num, (int __user *)p);
+		return tiocgetd(tty, p);
 	case TIOCSETD:
 		return tiocsetd(tty, p);
 	case TIOCVHANGUP:

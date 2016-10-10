@@ -139,9 +139,6 @@ static void set_dload_mode(int on)
 	if (ret)
 		pr_err("Failed to set secure DLOAD mode: %d\n", ret);
 
-	if (!on)
-		scm_disable_sdi();
-
 	dload_mode_enabled = on;
 }
 
@@ -198,7 +195,7 @@ static int dload_set(const char *val, struct kernel_param *kp)
 #else
 static void set_dload_mode(int on)
 {
-	scm_disable_sdi();
+	return;
 }
 
 static void enable_emergency_dload_mode(void)
@@ -289,7 +286,7 @@ static void msm_restart_prepare(const char *cmd)
 	}
 
 	/* Hard reset the PMIC unless memory contents must be maintained. */
-	if (need_warm_reset) {
+	if (need_warm_reset || in_panic) {
 		qpnp_pon_system_pwr_off(PON_POWER_OFF_WARM_RESET);
 	} else {
 		qpnp_pon_system_pwr_off(PON_POWER_OFF_HARD_RESET);
@@ -300,6 +297,14 @@ static void msm_restart_prepare(const char *cmd)
 			qpnp_pon_set_restart_reason(
 				PON_RESTART_REASON_BOOTLOADER);
 			__raw_writel(0x77665500, restart_reason);
+			/* set reboot_bl flag in PMIC for cold reset */
+			qpnp_pon_store_extra_reset_info(RESET_EXTRA_REBOOT_BL_REASON,
+				RESET_EXTRA_REBOOT_BL_REASON);
+			/*
+			 * force cold reboot here to avoid impaction from
+			 * modem double reboot workaround solution.
+			 */
+			qpnp_pon_system_pwr_off(PON_POWER_OFF_HARD_RESET);
 		} else if (!strncmp(cmd, "recovery", 8)) {
 			qpnp_pon_set_restart_reason(
 				PON_RESTART_REASON_RECOVERY);
@@ -329,9 +334,32 @@ static void msm_restart_prepare(const char *cmd)
 					     restart_reason);
 		} else if (!strncmp(cmd, "edl", 3)) {
 			enable_emergency_dload_mode();
+		} else if (!strncmp(cmd, "post-wdt", 8)) {
+			/* set  flag in PMIC to nofity BL post watchdog reboot */
+			qpnp_pon_store_extra_reset_info(RESET_EXTRA_POST_REBOOT_MASK,
+				RESET_EXTRA_POST_WDT_REASON);
+			 /* force cold reboot */
+			qpnp_pon_system_pwr_off(PON_POWER_OFF_HARD_RESET);
+		} else if (!strncmp(cmd, "post-pmicwdt", 12)) {
+			/* set  flag in PMIC to nofity BL post pmic watchdog reboot */
+			qpnp_pon_store_extra_reset_info(RESET_EXTRA_POST_REBOOT_MASK,
+				RESET_EXTRA_POST_PMICWDT_REASON);
+			 /* force cold reboot */
+			qpnp_pon_system_pwr_off(PON_POWER_OFF_HARD_RESET);
+		} else if (!strncmp(cmd, "post-panic", 10)) {
+			/* set  flag in PMIC to nofity BL post panic reboot */
+			qpnp_pon_store_extra_reset_info(RESET_EXTRA_POST_REBOOT_MASK,
+				RESET_EXTRA_POST_PANIC_REASON);
+			 /* force cold reboot */
+			qpnp_pon_system_pwr_off(PON_POWER_OFF_HARD_RESET);
 		} else {
 			__raw_writel(0x77665501, restart_reason);
 		}
+	} else if (in_panic == 1) {
+		__raw_writel(0x77665505, restart_reason);
+		qpnp_pon_store_extra_reset_info(RESET_EXTRA_PANIC_REASON, 0xFF);
+	} else {
+		__raw_writel(0x77665501, restart_reason);
 	}
 
 	flush_cache_all();
@@ -383,6 +411,7 @@ static void do_msm_restart(enum reboot_mode reboot_mode, const char *cmd)
 		msm_trigger_wdog_bite();
 #endif
 
+	scm_disable_sdi();
 	halt_spmi_pmic_arbiter();
 	deassert_ps_hold();
 
@@ -394,6 +423,7 @@ static void do_msm_poweroff(void)
 	pr_notice("Powering off the SoC\n");
 
 	set_dload_mode(0);
+	scm_disable_sdi();
 	qpnp_pon_system_pwr_off(PON_POWER_OFF_SHUTDOWN);
 
 	halt_spmi_pmic_arbiter();
@@ -441,6 +471,10 @@ static ssize_t show_emmc_dload(struct kobject *kobj, struct attribute *attr,
 				char *buf)
 {
 	uint32_t read_val, show_val;
+
+	if (dload_type_addr == NULL) {
+		return snprintf(buf, 8, "%s\n", "No Node");
+	}
 
 	read_val = __raw_readl(dload_type_addr);
 	if (read_val == EMMC_DLOAD_TYPE)
@@ -573,6 +607,8 @@ skip_sysfs_create:
 		scm_deassert_ps_hold_supported = true;
 
 	set_dload_mode(download_mode);
+	if (!download_mode)
+		scm_disable_sdi();
 
 	return 0;
 

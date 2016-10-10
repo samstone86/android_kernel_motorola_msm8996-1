@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -412,7 +412,7 @@ static int qpnp_pin_check_config(enum qpnp_pin_param_type idx,
 			return -EINVAL;
 		break;
 	case Q_PIN_CFG_DTEST_SEL:
-		if (!val && val > QPNP_PIN_DTEST_SEL_INVALID)
+		if (val > QPNP_PIN_DTEST_SEL_INVALID)
 			return -EINVAL;
 		break;
 	default:
@@ -494,6 +494,22 @@ static inline void q_reg_clr_set(u8 *reg, int shift, int mask, int value)
 {
 	*reg &= ~mask;
 	*reg |= (value << shift) & mask;
+}
+
+static bool is_mpp_cs(struct qpnp_pin_spec *q_spec)
+{
+	u8 mode;
+
+	if (!q_spec)
+		return false;
+
+	mode = q_reg_get(&q_spec->regs[Q_REG_I_MODE_CTL],
+			 Q_REG_MODE_SEL_SHIFT, Q_REG_MODE_SEL_MASK);
+
+	if (mode == QPNP_PIN_MODE_SINK)
+		return true;
+
+	return false;
 }
 
 /*
@@ -648,7 +664,8 @@ static int _qpnp_pin_config(struct qpnp_pin_chip *q_chip,
 			  param->output_type);
 
 	/* input config */
-	if (Q_HAVE_HW_SP(Q_PIN_CFG_DTEST_SEL, q_spec, param->dtest_sel)) {
+	if (Q_HAVE_HW_SP(Q_PIN_CFG_DTEST_SEL, q_spec, param->dtest_sel)
+			&& param->dtest_sel) {
 		if (is_gpio_lv_mv(q_spec)) {
 			q_reg_clr_set(&q_spec->regs[Q_REG_I_DIG_IN_CTL],
 					Q_REG_LV_MV_DTEST_SEL_CFG_SHIFT,
@@ -858,6 +875,31 @@ static int qpnp_pin_get(struct gpio_chip *gpio_chip, unsigned offset)
 	return 0;
 }
 
+static int qpnp_pin_cs_en(struct qpnp_pin_chip *q_chip,
+			  struct qpnp_pin_spec *q_spec, int value)
+{
+	int rc;
+	u8 shift, mask, *reg;
+	u16 address;
+
+	if (!q_chip || !q_spec)
+		return -EINVAL;
+
+	shift = Q_REG_MASTER_EN_SHIFT;
+	mask = Q_REG_MASTER_EN_MASK;
+	reg = &q_spec->regs[Q_REG_I_EN_CTL];
+	address = Q_REG_ADDR(q_spec, Q_REG_EN_CTL);
+
+	q_reg_clr_set(reg, shift, mask, !!value);
+
+	rc = spmi_ext_register_writel(q_chip->spmi->ctrl, q_spec->slave,
+						address, reg, 1);
+	if (rc)
+		dev_err(&q_chip->spmi->dev, "%s: spmi write failed\n",
+								__func__);
+	return rc;
+}
+
 static int __qpnp_pin_set(struct qpnp_pin_chip *q_chip,
 			   struct qpnp_pin_spec *q_spec, int value)
 {
@@ -887,6 +929,9 @@ static int __qpnp_pin_set(struct qpnp_pin_chip *q_chip,
 	if (rc)
 		dev_err(&q_chip->spmi->dev, "%s: spmi write failed\n",
 								__func__);
+	if (is_mpp_cs(q_spec))
+		qpnp_pin_cs_en(q_chip, q_spec, value);
+
 	return rc;
 }
 
@@ -915,6 +960,10 @@ static int qpnp_pin_set_mode(struct qpnp_pin_chip *q_chip,
 
 	if (!q_chip || !q_spec)
 		return -EINVAL;
+
+	if (is_mpp_cs(q_spec)) {
+		return 0;
+	}
 
 	if (qpnp_pin_check_config(Q_PIN_CFG_MODE, q_spec, mode)) {
 		pr_err("invalid mode specification %d\n", mode);
@@ -1241,8 +1290,8 @@ static int qpnp_pin_reg_attr(enum qpnp_pin_param_type type,
 		break;
 	case Q_PIN_CFG_DTEST_SEL:
 		if (is_gpio_lv_mv(q_spec)) {
-			cfg->shift = Q_REG_LV_MV_DTEST_SEL_SHIFT;
-			cfg->mask = Q_REG_LV_MV_DTEST_SEL_MASK;
+			cfg->shift = Q_REG_LV_MV_DTEST_SEL_CFG_SHIFT;
+			cfg->mask = Q_REG_LV_MV_DTEST_SEL_CFG_MASK;
 		} else {
 			cfg->shift = Q_REG_DTEST_SEL_SHIFT;
 			cfg->mask = Q_REG_DTEST_SEL_MASK;
@@ -1285,6 +1334,23 @@ static int qpnp_pin_debugfs_set(void *data, u64 val)
 	q_spec = container_of(idx, struct qpnp_pin_spec, params[*idx]);
 	q_chip = q_spec->q_chip;
 
+	/*
+	 * special handling for GPIO_LV/MV 'dtest-sel'
+	 * if (dtest_sel == 0) then disable dtest-sel
+	 * else enable and set dtest.
+	 */
+	if ((q_spec->subtype == Q_GPIO_SUBTYPE_GPIO_LV ||
+		q_spec->subtype == Q_GPIO_SUBTYPE_GPIO_MV) &&
+				*idx == Q_PIN_CFG_DTEST_SEL) {
+		/* enable/disable DTEST */
+		cfg.shift = Q_REG_LV_MV_DTEST_SEL_EN_SHIFT;
+		cfg.mask = Q_REG_LV_MV_DTEST_SEL_EN_MASK;
+		cfg.addr = Q_REG_DIG_IN_CTL;
+		cfg.idx = Q_REG_I_DIG_IN_CTL;
+		q_reg_clr_set(&q_spec->regs[cfg.idx],
+				cfg.shift, cfg.mask, !!val);
+	}
+
 	rc = qpnp_pin_check_config(*idx, q_spec, val);
 	if (rc)
 		return rc;
@@ -1292,6 +1358,14 @@ static int qpnp_pin_debugfs_set(void *data, u64 val)
 	rc = qpnp_pin_reg_attr(*idx, &cfg, q_spec);
 	if (rc)
 		return rc;
+
+	if (*idx == Q_PIN_CFG_DTEST_SEL && val)  {
+		if (is_gpio_lv_mv(q_spec))
+			val -= 1;
+		else
+			val = BIT(val - 1);
+	}
+
 	q_reg_clr_set(&q_spec->regs[cfg.idx], cfg.shift, cfg.mask, val);
 	rc = spmi_ext_register_writel(q_chip->spmi->ctrl, q_spec->slave,
 				      Q_REG_ADDR(q_spec, cfg.addr),

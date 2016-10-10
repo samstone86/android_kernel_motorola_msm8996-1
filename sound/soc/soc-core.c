@@ -1159,6 +1159,10 @@ static int soc_probe_component(struct snd_soc_card *card,
 	}
 
 	list_for_each_entry(dai, &component->dai_list, list) {
+
+		if (dai->playback_widget || dai->capture_widget)
+			continue;
+
 		ret = snd_soc_dapm_new_dai_widgets(dapm, dai);
 		if (ret != 0) {
 			dev_err(component->dev,
@@ -2758,7 +2762,7 @@ int snd_soc_get_volsw_sx(struct snd_kcontrol *kcontrol,
 	unsigned int rshift = mc->rshift;
 	int max = mc->max;
 	int min = mc->min;
-	int mask = (1 << (fls(min + max) - 1)) - 1;
+	unsigned int mask = (unsigned int)(1 << (fls(min + max) - 1)) - 1;
 	unsigned int val;
 	int ret;
 

@@ -60,6 +60,7 @@ excito	Excito
 fcs	Fairchild Semiconductor
 fairchild	Fairchild Semiconductor International, Inc.
 focaltech	Focaltech systems
+fpc	Fingerprint Cards
 fsl	Freescale Semiconductor
 GEFanuc	GE Fanuc Intelligent Platforms Embedded Systems, Inc.
 goodix	Goodix. Ltd.
@@ -71,6 +72,7 @@ google	Google, Inc.
 goodix	Goodix. Ltd
 gumstix	Gumstix, Inc.
 gw	Gateworks Corporation
+halo	Halo Microelectronics Co., Ltd.
 haoyu	Haoyu Microelectronic Co. Ltd.
 hisilicon	Hisilicon Limited.
 honeywell	Honeywell
@@ -110,8 +112,10 @@ memsic	MEMSIC, Inc
 microchip	Microchip Technology Inc.
 micron	Micron Technology Inc.
 mitsubishi	Mitsubishi Electric Corporation
+mmi	Motorola Mobility LLC (formerly Motorola Mobility, Inc)
 mosaixtech	Mosaix Technologies, Inc.
 moxa	Moxa
+motosh  Motorola Sensorhub
 mpl	MPL AG
 mundoreader	Mundo Reader S.L.
 murata	Murata Manufacturing Co., Ltd.
@@ -133,6 +137,7 @@ pericom	Pericom Semiconductor Corp.
 phytec	PHYTEC Messtechnik GmbH
 picochip	Picochip Ltd
 plathome	Plat'Home Co., Ltd.
+plda	PLDA
 pixcir  PIXCIR MICROELECTRONICS Co., Ltd
 powervr	PowerVR (deprecated, use img)
 qca	Qualcomm Atheros, Inc.
@@ -171,6 +176,7 @@ spansion	Spansion Inc.
 st	STMicroelectronics
 ste	ST-Ericsson
 stericsson	ST-Ericsson
+stm     STMicroelectronics
 synaptics	Synaptics, Inc.
 synology	Synology, Inc.
 thine	THine Electronics, Inc.

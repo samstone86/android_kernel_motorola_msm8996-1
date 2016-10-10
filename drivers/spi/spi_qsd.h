@@ -276,7 +276,6 @@ struct msm_spi_bam {
 	u32                      irq;
 	struct msm_spi_bam_pipe  prod;
 	struct msm_spi_bam_pipe  cons;
-	bool                     deregister_required;
 	u32			 curr_rx_bytes_recvd;
 	u32			 curr_tx_bytes_sent;
 	u32			 bam_rx_len;
@@ -345,7 +344,8 @@ struct msm_spi {
 	int                      stat_tx;
 #ifdef CONFIG_DEBUG_FS
 	struct dentry *dent_spi;
-	struct dentry *debugfs_spi_regs[ARRAY_SIZE(debugfs_spi_regs)];
+	struct dentry *debugfs_spi_file[ARRAY_SIZE(debugfs_spi_regs)];
+	struct msm_spi_regs *debugfs_spi_reg;
 #endif
 	struct msm_spi_platform_data *pdata; /* Platform data */
 	/* When set indicates multiple transfers in a single message */

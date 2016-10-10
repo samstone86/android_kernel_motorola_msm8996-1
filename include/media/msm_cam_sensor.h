@@ -33,6 +33,7 @@ struct msm_camera_sensor_slave_info32 {
 	char flash_name[32];
 	enum msm_sensor_camera_id_t camera_id;
 	uint16_t slave_addr;
+	uint16_t slave_addr2;
 	enum i2c_freq_mode_t i2c_freq_mode;
 	enum msm_camera_i2c_reg_addr_type addr_type;
 	struct msm_sensor_id_info_t sensor_id_info;
@@ -120,6 +121,11 @@ struct msm_camera_i2c_array_write_config32 {
 	uint16_t slave_addr;
 };
 
+struct msm_mot_actuator_tuning_params_t32 {
+	int16_t infinity_dac;
+	int16_t macro_dac;
+};
+
 struct msm_actuator_tuning_params_t32 {
 	int16_t initial_code;
 	uint16_t pwd_step;
@@ -145,6 +151,7 @@ struct msm_actuator_params_t32 {
 struct msm_actuator_set_info_t32 {
 	struct msm_actuator_params_t32 actuator_params;
 	struct msm_actuator_tuning_params_t32 af_tuning_params;
+	struct msm_mot_actuator_tuning_params_t32 mot_af_tuning_params;
 };
 
 struct sensor_init_cfg_data32 {

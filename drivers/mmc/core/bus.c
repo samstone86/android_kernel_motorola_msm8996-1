@@ -27,6 +27,8 @@
 
 #define to_mmc_driver(d)	container_of(d, struct mmc_driver, drv)
 
+#define CARD_ADD_REMOVE_DELAY	2000
+
 static ssize_t type_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
@@ -166,6 +168,8 @@ static int mmc_bus_suspend(struct device *dev)
 			return ret;
 	}
 
+	if (mmc_bus_needs_resume(host))
+		return 0;
 	ret = host->bus_ops->suspend(host);
 	return ret;
 }
@@ -177,11 +181,17 @@ static int mmc_bus_resume(struct device *dev)
 	struct mmc_host *host = card->host;
 	int ret;
 
+	if (mmc_bus_manual_resume(host)) {
+		host->bus_resume_flags |= MMC_BUSRESUME_NEEDS_RESUME;
+		goto skip_full_resume;
+	}
+
 	ret = host->bus_ops->resume(host);
 	if (ret)
 		pr_warn("%s: error %d during resume (card was removed?)\n",
 			mmc_hostname(host), ret);
 
+skip_full_resume:
 	if (dev->driver && drv->resume)
 		ret = drv->resume(card);
 
@@ -195,6 +205,9 @@ static int mmc_runtime_suspend(struct device *dev)
 	struct mmc_card *card = mmc_dev_to_card(dev);
 	struct mmc_host *host = card->host;
 
+	if (mmc_bus_needs_resume(host))
+		return 0;
+
 	return host->bus_ops->runtime_suspend(host);
 }
 
@@ -202,6 +215,9 @@ static int mmc_runtime_resume(struct device *dev)
 {
 	struct mmc_card *card = mmc_dev_to_card(dev);
 	struct mmc_host *host = card->host;
+
+	if (mmc_bus_needs_resume(host))
+		host->bus_resume_flags &= ~MMC_BUSRESUME_NEEDS_RESUME;
 
 	return host->bus_ops->runtime_resume(host);
 }
@@ -372,6 +388,9 @@ int mmc_add_card(struct mmc_card *card)
 			pr_err("%s: %s: failed to init wakeup: %d\n",
 			       mmc_hostname(card->host), __func__, ret);
 	}
+
+	/* wait for user space to consume the event */
+	__pm_wakeup_event(&card->host->pm_ws, CARD_ADD_REMOVE_DELAY);
 	ret = device_add(&card->dev);
 	if (ret)
 		return ret;
@@ -399,6 +418,8 @@ void mmc_remove_card(struct mmc_card *card)
 			pr_info("%s: card %04x removed\n",
 				mmc_hostname(card->host), card->rca);
 		}
+		/* wait for user space to consume the event */
+		__pm_wakeup_event(&card->host->pm_ws, CARD_ADD_REMOVE_DELAY);
 		device_del(&card->dev);
 	}
 

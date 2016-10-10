@@ -21,6 +21,14 @@ config SND_SOC_QDSP6V2
 	 audio drivers. This includes q6asm, q6adm,
 	 q6afe interfaces to DSP using apr.
 
+config SND_SOC_QDSP_DEBUG
+	bool "QDSP Audio Driver Debug Feature"
+	help
+	 Configuration to enable debugging utilities for
+	 QDSP6 based audio drivers. One debugging utility
+	 is inducing kernel panic upon encountering critical
+	 errors from DSP audio modules
+
 config DOLBY_DAP
 	bool "Enable Dolby DAP"
 	depends on SND_SOC_MSM_QDSP6V2_INTF
@@ -102,6 +110,15 @@ config SND_SOC_APQ8084
 	 the machine drivers and the corresponding
 	 DAI-links.
 
+config SND_SOC_OPALUM
+	tristate
+	help
+	 To add support for Opalum Speaker Protection Library.
+	 This support is to configure the post processing
+	 parameters of QDSP AFE Opalum module. The configuration
+	 includes sending calibration data, tunning parameters and
+	 getting speaker characterization values back.
+
 config SND_SOC_MSM8994
 	tristate "SoC Machine driver for MSM8994 boards"
 	depends on ARCH_MSM8994
@@ -138,6 +155,8 @@ config SND_SOC_MSM8996
 	select MSM_QDSP6V2_CODECS
 	select SND_SOC_WCD9330
 	select SND_SOC_WCD9335
+	select SND_SOC_FLORIDA
+	select SND_SOC_CS35L34
 	select SND_SOC_WSA881X
 	select SND_SOC_MSM_HDMI_CODEC_RX
 	select DTS_SRS_TM
@@ -147,6 +166,8 @@ config SND_SOC_MSM8996
 	select DOLBY_DS2
 	select SND_HWDEP
         select DTS_EAGLE
+	select SND_SOC_FSA8500
+	select SND_SOC_MODS_CODEC_SHIM
 	help
 	 To add support for SoC audio on MSM8996.
 	 This will enable sound soc drivers which
@@ -156,7 +177,7 @@ config SND_SOC_MSM8996
 
 config SND_SOC_MSM8X16
 	tristate "SoC Machine driver for MSM8916"
-	depends on ARCH_MSMTITANIUM || ARCH_MSM8916 || ARCH_MSM8937
+	depends on ARCH_MSM8953 || ARCH_MSM8937
 	select SND_SOC_QDSP6V2
 	select SND_SOC_MSM_STUB
 	select SND_SOC_MSM_HOSTLESS_PCM
@@ -178,6 +199,9 @@ config SND_SOC_MSM8X16
 	select SND_SOC_MSM_HDMI_DBA_CODEC_RX
 	select SND_HWDEP
         select DTS_EAGLE
+	select SND_SOC_MARLEY
+	select SND_SOC_CS35L34
+	select SND_SOC_OPALUM
 	help
 	 To add support for SoC audio on MSM8996.
 	 This will enable sound soc drivers which
@@ -192,7 +216,7 @@ config SND_SOC_MDMCALIFORNIUM
         select SND_SOC_MSM_STUB
         select SND_SOC_MSM_HOSTLESS_PCM
         select SND_DYNAMIC_MINORS
-        select MSM_QDSP6_APRV3
+        select MSM_QDSP6_APRV3_GLINK
         select MSM_QDSP6V2_CODECS
         select SND_SOC_WCD9335
         select SND_SOC_WSA881X
@@ -217,6 +241,25 @@ config SND_SOC_MDM9607
 	select SND_HWDEP
 	help
 	 To add support for SoC audio on MDM9607 boards.
+	 This will enable sound soc drivers which
+	 interfaces with DSP, also it will enable
+	 the machine drivers and the corresponding
+	 DAI-links.
+
+config SND_SOC_MSM8909
+	tristate "SoC Machine driver for MSM8909 boards"
+	depends on ARCH_MSM8909
+	select SND_SOC_QDSP6V2
+	select SND_SOC_MSM_STUB
+	select SND_SOC_MSM_HOSTLESS_PCM
+	select SND_DYNAMIC_MINORS
+	select MSM_QDSP6_APRV3
+	select MSM_QDSP6V2_CODECS
+	select SND_SOC_MSM8X16_WCD
+	select SND_SOC_WSA881X_ANALOG
+	select SND_HWDEP
+	help
+	 To add support for SoC audio on MSM8909 boards.
 	 This will enable sound soc drivers which
 	 interfaces with DSP, also it will enable
 	 the machine drivers and the corresponding

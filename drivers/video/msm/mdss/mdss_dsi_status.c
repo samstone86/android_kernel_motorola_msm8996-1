@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -30,8 +30,8 @@
 #include "mdss_panel.h"
 #include "mdss_mdp.h"
 
-#define STATUS_CHECK_INTERVAL_MS 5000
-#define STATUS_CHECK_INTERVAL_MIN_MS 50
+#define STATUS_CHECK_INTERVAL_MS 8000
+#define STATUS_CHECK_INTERVAL_MIN_MS 200
 #define DSI_STATUS_CHECK_INIT -1
 #define DSI_STATUS_CHECK_DISABLE 1
 
@@ -125,6 +125,10 @@ static int fb_event_callback(struct notifier_block *self,
 		pr_err("%s: event data not available\n", __func__);
 		return NOTIFY_BAD;
 	}
+
+	/* handle only mdss fb device */
+	if (strncmp("mdssfb", evdata->info->fix.id, 6))
+		return NOTIFY_DONE;
 
 	mfd = evdata->info->par;
 	ctrl_pdata = container_of(dev_get_platdata(&mfd->pdev->dev),

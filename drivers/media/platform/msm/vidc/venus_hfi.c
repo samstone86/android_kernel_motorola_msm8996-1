@@ -27,6 +27,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
+#include <linux/vmalloc.h>
 #include <soc/qcom/scm.h>
 #include <soc/qcom/smem.h>
 #include <soc/qcom/subsystem_restart.h>
@@ -2226,9 +2227,14 @@ static int venus_hfi_core_init(void *device)
 	if (rc || __iface_cmdq_write(dev, &version_pkt))
 		dprintk(VIDC_WARN, "Failed to send image version pkt to f/w\n");
 
-	if (dev->res->pm_qos_latency_us)
+	if (dev->res->pm_qos_latency_us) {
+#ifdef CONFIG_SMP
+		dev->qos.type = PM_QOS_REQ_AFFINE_IRQ;
+		dev->qos.irq = dev->hal_data->irq;
+#endif
 		pm_qos_add_request(&dev->qos, PM_QOS_CPU_DMA_LATENCY,
 				dev->res->pm_qos_latency_us);
+	}
 
 	mutex_unlock(&dev->lock);
 	return rc;
@@ -2252,7 +2258,8 @@ static int venus_hfi_core_release(void *dev)
 
 	mutex_lock(&device->lock);
 
-	if (device->res->pm_qos_latency_us)
+	if (device->res->pm_qos_latency_us &&
+		pm_qos_request_active(&device->qos))
 		pm_qos_remove_request(&device->qos);
 	__set_state(device, VENUS_STATE_DEINIT);
 	__unload_fw(device);
@@ -3324,7 +3331,11 @@ static void __flush_debug_queue(struct venus_hfi_device *device, u8 *packet)
 	}
 
 	if (!packet) {
-		packet = kzalloc(VIDC_IFACEQ_VAR_HUGE_PKT_SIZE, GFP_TEMPORARY);
+		if (VIDC_IFACEQ_VAR_HUGE_PKT_SIZE > PAGE_SIZE)
+			packet = vzalloc(VIDC_IFACEQ_VAR_HUGE_PKT_SIZE);
+		else
+			packet = kzalloc(VIDC_IFACEQ_VAR_HUGE_PKT_SIZE,
+					GFP_TEMPORARY);
 		if (!packet) {
 			dprintk(VIDC_ERR, "In %s() Fail to allocate mem\n",
 				__func__);
@@ -3353,7 +3364,7 @@ static void __flush_debug_queue(struct venus_hfi_device *device, u8 *packet)
 	}
 
 	if (local_packet)
-		kfree(packet);
+		kvfree(packet);
 }
 
 static struct hal_session *__get_session(struct venus_hfi_device *device,
@@ -3381,10 +3392,14 @@ static int __response_handler(struct venus_hfi_device *device)
 
 	packets = device->response_pkt;
 
-	raw_packet = kzalloc(VIDC_IFACEQ_VAR_HUGE_PKT_SIZE, GFP_TEMPORARY);
+	if (VIDC_IFACEQ_VAR_HUGE_PKT_SIZE > PAGE_SIZE)
+		raw_packet = vzalloc(VIDC_IFACEQ_VAR_HUGE_PKT_SIZE);
+	else
+		raw_packet = kzalloc(VIDC_IFACEQ_VAR_HUGE_PKT_SIZE,
+				GFP_TEMPORARY);
 	if (!raw_packet || !packets) {
 		dprintk(VIDC_ERR, "%s: Failed to allocate memory\n",  __func__);
-		kfree(raw_packet);
+		kvfree(raw_packet);
 		return 0;
 	}
 
@@ -3540,7 +3555,7 @@ static int __response_handler(struct venus_hfi_device *device)
 exit:
 	__flush_debug_queue(device, raw_packet);
 
-	kfree(raw_packet);
+	kvfree(raw_packet);
 	return packet_count;
 }
 
@@ -4265,7 +4280,8 @@ static inline int __suspend(struct venus_hfi_device *device)
 
 	dprintk(VIDC_DBG, "Entering power collapse\n");
 
-	if (device->res->pm_qos_latency_us)
+	if (device->res->pm_qos_latency_us &&
+		pm_qos_request_active(&device->qos))
 		pm_qos_remove_request(&device->qos);
 
 	rc = __tzbsp_set_video_state(TZBSP_VIDEO_STATE_SUSPEND);
@@ -4327,9 +4343,14 @@ static inline int __resume(struct venus_hfi_device *device)
 	 */
 	__set_threshold_registers(device);
 
-	if (device->res->pm_qos_latency_us)
+	if (device->res->pm_qos_latency_us) {
+#ifdef CONFIG_SMP
+		device->qos.type = PM_QOS_REQ_AFFINE_IRQ;
+		device->qos.irq = device->hal_data->irq;
+#endif
 		pm_qos_add_request(&device->qos, PM_QOS_CPU_DMA_LATENCY,
 				device->res->pm_qos_latency_us);
+	}
 	dprintk(VIDC_INFO, "Resumed from power collapse\n");
 exit:
 	device->skip_pc_count = 0;
