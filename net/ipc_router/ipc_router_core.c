@@ -3156,12 +3156,12 @@ int msm_ipc_router_send_to(struct msm_ipc_port *src,
 
 	if (src->check_send_permissions) {
 		ret = src->check_send_permissions(rport_ptr->sec_rule);
-		if (ret <= 0) {
+		/*if (ret <= 0) {
 			kref_put(&rport_ptr->ref, ipc_router_release_rport);
 			IPC_RTR_ERR("%s: permission failure for %s\n",
 				__func__, current->comm);
 			return -EPERM;
-		}
+		}*/
 	}
 
 	if (dst_node_id == IPC_ROUTER_NID_LOCAL && !src->rport_info) {
