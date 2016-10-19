@@ -54,7 +54,7 @@ gb-display-y := display.o
 gb-sensors_ext-y := sensors_ext.o sensors_ext_iio.o
 
 obj-y += greybus.o
-obj-y += gb-audio.o
+#obj-y += gb-audio.o
 obj-y += gb-battery.o
 obj-y += gb-light.o
 obj-y += gb-hid.o
