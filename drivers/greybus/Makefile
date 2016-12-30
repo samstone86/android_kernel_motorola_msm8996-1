@@ -53,19 +53,19 @@ gb-usb_ext-y := usb-ext.o
 gb-display-y := display.o
 gb-sensors_ext-y := sensors_ext.o sensors_ext_iio.o
 
-obj-y += greybus.o
-#obj-y += gb-audio.o
-obj-y += gb-battery.o
-obj-y += gb-light.o
-obj-y += gb-hid.o
-obj-y += gb-raw.o
-obj-y += gb-mods.o
-obj-y += gb-vendor-moto.o
-obj-y += gb-ptp.o
-obj-y += gb-camera_ext.o
-obj-y += gb-display.o
-obj-y += gb-usb_ext.o
-obj-y += gb-sensors_ext.o
+obj-$(CONFIG_GREYBUS_MOTOROLA) += greybus.o
+#obj-$(CONFIG_GREYBUS_MOTOROLA) += gb-audio.o
+obj-$(CONFIG_GREYBUS_MOTOROLA) += gb-battery.o
+obj-$(CONFIG_GREYBUS_MOTOROLA) += gb-light.o
+obj-$(CONFIG_GREYBUS_MOTOROLA) += gb-hid.o
+obj-$(CONFIG_GREYBUS_MOTOROLA) += gb-raw.o
+obj-$(CONFIG_GREYBUS_MOTOROLA) += gb-mods.o
+obj-$(CONFIG_GREYBUS_MOTOROLA) += gb-vendor-moto.o
+obj-$(CONFIG_GREYBUS_MOTOROLA) += gb-ptp.o
+obj-$(CONFIG_GREYBUS_MOTOROLA) += gb-camera_ext.o
+obj-$(CONFIG_GREYBUS_MOTOROLA) += gb-display.o
+obj-$(CONFIG_GREYBUS_MOTOROLA) += gb-usb_ext.o
+obj-$(CONFIG_GREYBUS_MOTOROLA) += gb-sensors_ext.o
 
 CONFIG_OPTIONS_ENABLE += LEDS_CLASS_FLASH
 

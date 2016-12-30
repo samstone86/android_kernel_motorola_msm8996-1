@@ -1,0 +1,9 @@
+comment "Motorola Greybus module"
+
+config GREYBUS_MOTOROLA
+
+        tristate "Motorola greybus module"
+        default n
+        help
+        Add support for the Motorola greybus module
+

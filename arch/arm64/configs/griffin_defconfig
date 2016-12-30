@@ -4390,6 +4390,11 @@ CONFIG_MOBICORE_DRIVER=y
 # CONFIG_TRUSTONIC_TRUSTED_UI is not set
 
 #
+# Motorola Greybus module
+#
+CONFIG_GREYBUS_MOTOROLA=m
+
+#
 # Firmware Drivers
 #
 
