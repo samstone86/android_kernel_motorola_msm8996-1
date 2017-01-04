@@ -26,7 +26,6 @@
  */
 
 #include <linux/firmware.h>
-#include <linux/crc32.h>
 #include "ol_if_athvar.h"
 #include "ol_fw.h"
 #include "targaddrs.h"
@@ -62,48 +61,7 @@
 #include "qwlan_version.h"
 
 #ifdef FEATURE_SECURE_FIRMWARE
-static struct hash_fw fw_hash = {
-
-/* qwlan30.bin sha256sum hash */
-{0x6f, 0x22, 0xac, 0x5d, 0x2b, 0x39, 0x62, 0x61, 0x44,
- 0x90, 0xae, 0x55, 0xf4, 0xba, 0xab, 0x7c, 0x22, 0x63,
- 0x7d, 0xbf, 0x5f, 0x39, 0x32, 0x94, 0x30, 0x40, 0xa2,
- 0x7f, 0xd3, 0xc8, 0x79, 0xc4, },
-
-/* otp30.bin sha256sum hash */
-{0x88, 0x9b, 0xcc, 0x0b, 0xbd, 0x13, 0x9c, 0xd1, 0xe5,
- 0x1d, 0x28, 0x24, 0x3c, 0x47, 0x27, 0x4b, 0xa6, 0x87,
- 0xeb, 0xd9, 0x68, 0xe6, 0x44, 0x2e, 0x28, 0xf2, 0xc1,
- 0x05, 0xd0, 0xd3, 0xc2, 0x31, },
-
-/* bdwlan30.bin sha256sum hash */
-{0xd7, 0x8d, 0xf8, 0xb6, 0x6f, 0xcd, 0x16, 0xdf, 0xb9,
- 0xbd, 0xf8, 0x3c, 0x66, 0x21, 0x41, 0x9a, 0xca, 0xda,
- 0xdd, 0x7d, 0x6f, 0x64, 0x0a, 0xb1, 0x2f, 0x4d, 0x3c,
- 0x03, 0xeb, 0x20, 0xc9, 0xcc, },
-
-/* utf30.bin sha256sum hash */
-{0x9c, 0x9c, 0x43, 0xbd, 0xd7, 0x00, 0xdc, 0x1e, 0x61,
- 0x96, 0xda, 0x79, 0xa3, 0xeb, 0x3a, 0xb6, 0xad, 0xed,
- 0x96, 0x8a, 0x07, 0xb1, 0xa9, 0xab, 0x3d, 0x40, 0x61,
- 0x77, 0x6a, 0x5b, 0x1c, 0x23, },
-
-};
-
-// BEGIN MOT a19110 IKSWM-44483 Implement carrier specific bdwlan file picking
-static u8 bdwlan_arg[SHA256_DIGEST_SIZE] = {0xa8, 0x52, 0xd4, 0x34, 0xf8, 0xc2, 0x7e, 0x8f, 0x03,
-                                            0x65, 0x5b, 0x55, 0x58, 0xe2, 0x83, 0xca, 0x6a, 0x8d,
-                                            0xa7, 0x4d, 0x26, 0xa1, 0x0a, 0x85, 0xcc, 0x8e, 0x3b,
-                                            0xa6, 0x5a, 0xc9, 0xa7, 0x3d, };
-static u8 bdwlan_ind[SHA256_DIGEST_SIZE] = {0xcf, 0xd4, 0x4a, 0x93, 0x23, 0x19, 0x29, 0x41, 0x8f,
-                                            0xda, 0x62, 0xc9, 0xb7, 0x81, 0xbe, 0xf2, 0x15, 0xa3,
-                                            0x97, 0x67, 0x77, 0xb2, 0x67, 0x2d, 0x28, 0xed, 0x39,
-                                            0x4b, 0xf2, 0xe0, 0xb7, 0x1d, }; //IKSWM-50243
-static u8 bdwlan_bra[SHA256_DIGEST_SIZE] = {0xa8, 0x52, 0xd4, 0x34, 0xf8, 0xc2, 0x7e, 0x8f, 0x03,
-                                            0x65, 0x5b, 0x55, 0x58, 0xe2, 0x83, 0xca, 0x6a, 0x8d,
-                                            0xa7, 0x4d, 0x26, 0xa1, 0x0a, 0x85, 0xcc, 0x8e, 0x3b,
-                                            0xa6, 0x5a, 0xc9, 0xa7, 0x3d, };
-// END IKSWM-44483
+static struct hash_fw fw_hash;
 #endif
 
 #if defined(HIF_PCI) || defined(HIF_SDIO)
@@ -532,85 +490,6 @@ static char *ol_board_id_to_filename(struct ol_softc *scn, uint16_t board_id)
 }
 #endif
 
-
-
-/**
- * qca6174_compute_checksum_only() - compute checksum of 6320 eeprom memory in uint16_t
- * @ half_ptr: pointer to 6320 eeprom memory in uint16_t pointer
- * @ length: length of 6320 eeprom memory in unit of uint16_t
- *
- * Return: sum calculated for checksum
- */
-static u_int16_t qca6174_compute_checksum_only(u_int16_t *half_ptr, u_int16_t length)
-{
-	u_int16_t sum = 0, i;
-	for(i = 0; i < length; i++) { sum ^= *half_ptr++; }
-	return(sum);
-}
-
-/* Verify that the trailing CRC-32 matches the preceding content.
-*/
-static int verify_crc32(const struct firmware *fw_entry)
-{
-	u_int8_t *data = (u_int8_t *)(fw_entry->data);
-	u_int8_t *data_crc = data + fw_entry->size - 4;
-	u_int32_t crc;
-
-	crc = ~crc32_le(~0, data, fw_entry->size - 4);
-	return ((data_crc[0] == (crc       & 0xFF)) &&
-			(data_crc[1] == (crc >> 8  & 0xFF)) &&
-			(data_crc[2] == (crc >> 16 & 0xFF)) &&
-			(data_crc[3] == (crc >> 24 & 0xFF)) );
-}
-
-/* BDF is copied in tempEeprom.
-* Check if 2g_scpc_cal.bin and 5g_scpc_cal.bin are available.
-* If yes, merge them into BDF and change checksum
-*/
-#define AR6320_EEPROM_CHECKSUM_OFFSET 0x2
-#define AR6320_EEPROM_CHECKSUM_LENGTH 0x2
-#define AR6320_EEPROM_2G_SCPC_CAL_DATA_OFFSET 0x280
-#define AR6320_EEPROM_2G_SCPC_CAL_DATA_LENGTH 0x17A
-#define AR6320_EEPROM_5G_SCPC_CAL_DATA_OFFSET 0xAE8
-#define AR6320_EEPROM_5G_SCPC_CAL_DATA_LENGTH 0x360
-
-static void load_and_merge_scpc_calibration(struct ol_softc *scn, u_int8_t *tempEeprom,
-									u_int32_t fw_entry_size)
-{
-	u_int16_t sum;
-	const char *filename_2g_cal = "wlan/qca_cld/2g_scpc_cal.bin";
-	const char *filename_5g_cal = "wlan/qca_cld/5g_scpc_cal.bin";
-	const struct firmware *fw_entry_2g_cal = NULL;
-	const struct firmware *fw_entry_5g_cal = NULL;
-	/* merge to BDF only if 2G cal and
-	* 5G cal files are available
-	*/
-	if ((request_firmware(&fw_entry_2g_cal, filename_2g_cal, scn->sc_osdev->device) == 0) &&
-		(request_firmware(&fw_entry_5g_cal, filename_5g_cal, scn->sc_osdev->device) == 0) &&
-		(fw_entry_2g_cal->size == AR6320_EEPROM_2G_SCPC_CAL_DATA_LENGTH + 4) &&
-		(fw_entry_5g_cal->size == AR6320_EEPROM_5G_SCPC_CAL_DATA_LENGTH + 4) &&
-		(verify_crc32(fw_entry_2g_cal)) &&
-		(verify_crc32(fw_entry_5g_cal)) )
-	{
-		OS_MEMCPY(tempEeprom + AR6320_EEPROM_2G_SCPC_CAL_DATA_OFFSET,
-				(u_int8_t *)fw_entry_2g_cal->data, AR6320_EEPROM_2G_SCPC_CAL_DATA_LENGTH);
-		OS_MEMCPY(tempEeprom + AR6320_EEPROM_5G_SCPC_CAL_DATA_OFFSET,
-				(u_int8_t *)fw_entry_5g_cal->data, AR6320_EEPROM_5G_SCPC_CAL_DATA_LENGTH);
-
-		/* compute checksum with new content */
-		OS_MEMSET(tempEeprom + AR6320_EEPROM_CHECKSUM_OFFSET, 0, AR6320_EEPROM_CHECKSUM_LENGTH);
-		sum = qca6174_compute_checksum_only((u_int16_t *)tempEeprom, fw_entry_size/sizeof(u_int16_t));
-		sum = 0xFFFF ^ sum;
-		OS_MEMCPY(tempEeprom + AR6320_EEPROM_CHECKSUM_OFFSET, &sum, AR6320_EEPROM_CHECKSUM_LENGTH);
-		pr_info("%s: cal files merged\n", __func__);
-	} else {
-		pr_info("%s: cal files not merged\n", __func__);
-	}
-	/* release the memory */
-	if (fw_entry_2g_cal) release_firmware(fw_entry_2g_cal);
-	if (fw_entry_5g_cal) release_firmware(fw_entry_5g_cal);
-}
-
 static int __ol_transfer_bin_file(struct ol_softc *scn, ATH_BIN_FILE file,
 				u_int32_t address, bool compressed)
 {
@@ -791,15 +670,6 @@ static int __ol_transfer_bin_file(struct ol_softc *scn, ATH_BIN_FILE file,
 	tempEeprom = NULL;
 
 #ifdef FEATURE_SECURE_FIRMWARE
-// BEGIN MOT a19110 IKSWM-44483 Implement carrier specific bdwlan file picking
-	if(!strcmp(filename,"bdwlan30_arg.bin")) {
-		memcpy(fw_hash.bdwlan, bdwlan_arg, SHA256_DIGEST_SIZE);
-	} else if (!strcmp(filename,"bdwlan30_ind.bin")) {
-		memcpy(fw_hash.bdwlan, bdwlan_ind, SHA256_DIGEST_SIZE);
-	} else if (!strcmp(filename,"bdwlan30_bra.bin")) {
-		memcpy(fw_hash.bdwlan, bdwlan_bra, SHA256_DIGEST_SIZE);
-	}
-// END IKSWM-44483
 	if (scn->enable_fw_hash_check &&
 	    ol_check_fw_hash(fw_entry->data, fw_entry_size, file)) {
 		pr_err("Hash Check failed for file:%s\n", filename);
@@ -821,8 +691,6 @@ static int __ol_transfer_bin_file(struct ol_softc *scn, ATH_BIN_FILE file,
 		}
 
 		OS_MEMCPY(tempEeprom, (u_int8_t *)fw_entry->data, fw_entry_size);
-
-		load_and_merge_scpc_calibration(scn, tempEeprom, fw_entry_size);
 
 		switch (scn->target_type) {
 		default:

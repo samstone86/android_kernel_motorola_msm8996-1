@@ -825,6 +825,7 @@ void limFillFTSession(tpAniSirGlobal pMac,
    tSchBeaconStruct  *pBeaconStruct;
    tANI_U32          selfDot11Mode;
    ePhyChanBondState cbEnabledMode;
+   VOS_STATUS vosStatus;
 
    pBeaconStruct = vos_mem_malloc(sizeof(tSchBeaconStruct));
    if (NULL == pBeaconStruct) {
@@ -987,6 +988,20 @@ void limFillFTSession(tpAniSirGlobal pMac,
    pftSessionEntry->encryptType = psessionEntry->encryptType;
 #ifdef WLAN_FEATURE_11W
    pftSessionEntry->limRmfEnabled = psessionEntry->limRmfEnabled;
+
+   if (psessionEntry->limRmfEnabled) {
+       psessionEntry->pmfComebackTimerInfo.pMac = pMac;
+       psessionEntry->pmfComebackTimerInfo.sessionID =
+                                     psessionEntry->smeSessionId;
+       vosStatus = vos_timer_init(&psessionEntry->pmfComebackTimer,
+                                  VOS_TIMER_TYPE_SW,
+                                  limPmfComebackTimerCallback,
+                                 (void *)&psessionEntry->pmfComebackTimerInfo);
+       if (VOS_STATUS_SUCCESS != vosStatus) {
+           limLog(pMac, LOGP,
+                  FL("cannot init pmf comeback timer."));
+       }
+   }
 #endif
 
    if (pftSessionEntry->limRFBand == SIR_BAND_2_4_GHZ)
@@ -1275,6 +1290,11 @@ void limHandleFTPreAuthRsp(tpAniSirGlobal pMac, tSirRetStatus status,
       pftSessionEntry->limSmeState = eLIM_SME_WT_REASSOC_STATE;
       pftSessionEntry->smpsMode = psessionEntry->smpsMode;
 
+      if (IS_5G_CH(psessionEntry->ftPEContext.pFTPreAuthReq->preAuthchannelNum))
+          pftSessionEntry->vdev_nss = pMac->vdev_type_nss_5g.sta;
+      else
+          pftSessionEntry->vdev_nss = pMac->vdev_type_nss_2g.sta;
+
       PELOGE(limLog(pMac, LOG1, "%s:created session (%p) with id = %d",
                __func__, pftSessionEntry, pftSessionEntry->peSessionId);)
 
@@ -1440,6 +1460,12 @@ void limProcessMlmFTReassocReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf,
         vos_mem_free(pMlmReassocReq);
         goto end;
     }
+
+    lim_update_caps_info_for_bss(pMac, &caps,
+                  psessionEntry->pLimReAssocReq->bssDescription.capabilityInfo);
+
+    limLog(pMac, LOG1, FL("Capabilities info FT Reassoc: 0x%X"), caps);
+
     pMlmReassocReq->capabilityInfo = caps;
 
     /* Update PE sessionId*/

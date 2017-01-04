@@ -2918,6 +2918,8 @@ typedef enum {
      * the values. Safety check will happen in Halphy
      */
     WMI_PDEV_PARAM_TXPOWER_DECR_DB,
+     /** Set TX delay value in TX sch module, unit is microseconds */
+    WMI_PDEV_PARAM_TX_SCH_DELAY,
 } WMI_PDEV_PARAM;
 
 typedef enum {
@@ -6564,6 +6566,7 @@ typedef enum event_type_e {
     WOW_IOAC_REV_KA_FAIL_EVENT,
     WOW_IOAC_SOCK_EVENT,
     WOW_NLO_SCAN_COMPLETE_EVENT,
+    WOW_TDLS_CONN_TRACKER_EVENT,
 } WOW_WAKE_EVENT_TYPE;
 
 typedef enum wake_reason_e {
@@ -6607,6 +6610,7 @@ typedef enum wake_reason_e {
     WOW_REASON_REASSOC_REQ_RECV,
     WOW_REASON_REASSOC_RES_RECV,
     WOW_REASON_ACTION_FRAME_RECV,
+    WOW_REASON_TDLS_CONN_TRACKER_EVENT,
     WOW_REASON_DEBUG_TEST = 0xFF,
 } WOW_WAKE_REASON_TYPE;
 

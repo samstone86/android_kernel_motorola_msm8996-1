@@ -1011,10 +1011,10 @@ VosMCThread
         clear_bit(MC_SUSPEND_EVENT_MASK, &pSchedContext->mcEventFlag);
         spin_lock(&pSchedContext->McThreadLock);
 
+        INIT_COMPLETION(pSchedContext->ResumeMcEvent);
         /* Mc Thread Suspended */
         complete(&pHddCtx->mc_sus_event_var);
 
-        INIT_COMPLETION(pSchedContext->ResumeMcEvent);
         spin_unlock(&pSchedContext->McThreadLock);
 
         /* Wait foe Resume Indication */
@@ -1529,7 +1529,9 @@ void vos_free_tlshim_pkt_freeq(pVosSchedContext pSchedContext)
        pkt = list_entry((&pSchedContext->VosTlshimPktFreeQ)->next,
                      typeof(*pkt), list);
        list_del(&pkt->list);
+       spin_unlock_bh(&pSchedContext->VosTlshimPktFreeQLock);
        vos_mem_free(pkt);
+       spin_lock_bh(&pSchedContext->VosTlshimPktFreeQLock);
    }
    spin_unlock_bh(&pSchedContext->VosTlshimPktFreeQLock);
 
@@ -1776,8 +1778,8 @@ static int VosTlshimRxThread(void *arg)
                clear_bit(RX_SUSPEND_EVENT_MASK,
                          &pSchedContext->tlshimRxEvtFlg);
                spin_lock(&pSchedContext->TlshimRxThreadLock);
-               complete(&pSchedContext->SuspndTlshimRxEvent);
                INIT_COMPLETION(pSchedContext->ResumeTlshimRxEvent);
+               complete(&pSchedContext->SuspndTlshimRxEvent);
                spin_unlock(&pSchedContext->TlshimRxThreadLock);
                wait_for_completion_interruptible(
                               &pSchedContext->ResumeTlshimRxEvent);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2016 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -251,7 +251,7 @@ limSendProbeReqMgmtFrame(tpAniSirGlobal pMac,
     tANI_U8             smeSessionId = 0;
     bool                isVHTEnabled = false;
     uint16_t addn_ielen = nAdditionalIELen;
-    bool                extracted_ext_cap_flag = true;
+    bool                extracted_ext_cap_flag = false;
     tDot11fIEExtCap     extracted_ext_cap;
 
 
@@ -405,7 +405,6 @@ limSendProbeReqMgmtFrame(tpAniSirGlobal pMac,
                                       &addn_ielen,
                                       &extracted_ext_cap);
         if (eSIR_SUCCESS != nSirStatus) {
-            extracted_ext_cap_flag = eANI_BOOLEAN_FALSE;
             limLog(pMac, LOG1,
                  FL("Unable to Stripoff ExtCap IE from Probe Req"));
         } else {
@@ -596,7 +595,7 @@ limSendProbeRspMgmtFrame(tpAniSirGlobal pMac,
     tANI_U8              smeSessionId = 0;
     tANI_BOOLEAN         isVHTEnabled = eANI_BOOLEAN_FALSE;
     tDot11fIEExtCap      extractedExtCap;
-    tANI_BOOLEAN         extractedExtCapFlag = eANI_BOOLEAN_TRUE;
+    tANI_BOOLEAN         extractedExtCapFlag = eANI_BOOLEAN_FALSE;
 
     if (ANI_DRIVER_TYPE(pMac) == eDRIVER_TYPE_MFG) {
         /* We don't answer requests in this case */
@@ -804,9 +803,10 @@ limSendProbeRspMgmtFrame(tpAniSirGlobal pMac,
                                   &extractedExtCap );
         if(eSIR_SUCCESS != nSirStatus )
         {
-            extractedExtCapFlag = eANI_BOOLEAN_FALSE;
             limLog(pMac, LOG1,
                 FL("Unable to Stripoff ExtCap IE from Probe Rsp"));
+        } else {
+            extractedExtCapFlag = eANI_BOOLEAN_TRUE;
         }
 
         nBytes = nBytes + totalAddnIeLen;
@@ -2054,11 +2054,11 @@ limSendAssocReqMgmtFrame(tpAniSirGlobal   pMac,
 
     vos_mem_set( ( tANI_U8* )pFrm, sizeof( tDot11fAssocRequest ), 0 );
 
-    if (nAddIELen) {
+    if (nAddIELen && psessionEntry->is_ext_caps_present) {
         vos_mem_set(( tANI_U8* )&extractedExtCap, sizeof( tDot11fIEExtCap ), 0);
         nSirStatus = lim_strip_extcap_update_struct(pMac, pAddIE,
-                                      &nAddIELen,
-                                      &extractedExtCap );
+                      &nAddIELen,
+                      &extractedExtCap );
         if(eSIR_SUCCESS != nSirStatus )
         {
             extractedExtCapFlag = eANI_BOOLEAN_FALSE;
@@ -2074,7 +2074,8 @@ limSendAssocReqMgmtFrame(tpAniSirGlobal   pMac,
             extractedExtCapFlag = lim_is_ext_cap_ie_present(p_ext_cap);
         }
     } else {
-        limLog(pMac, LOG1, FL("No additional IE for Assoc Request"));
+        limLog(pMac, LOG1,
+                FL("No addn IE or peer dosen't support addnIE for Assoc Req"));
         extractedExtCapFlag = eANI_BOOLEAN_FALSE;
     }
 
@@ -2139,7 +2140,8 @@ limSendAssocReqMgmtFrame(tpAniSirGlobal   pMac,
             &pFrm->ExtSuppRates, psessionEntry );
 
 #if defined WLAN_FEATURE_VOWIFI
-    if (pMac->rrm.rrmPEContext.rrmEnable)
+    if (pMac->rrm.rrmPEContext.rrmEnable &&
+            SIR_MAC_GET_RRM(psessionEntry->limCurrentBssCaps))
         PopulateDot11fRRMIe(pMac, &pFrm->RRMEnabledCap, psessionEntry);
 #endif
     // The join request *should* contain zero or one of the WPA and RSN
@@ -2214,8 +2216,8 @@ limSendAssocReqMgmtFrame(tpAniSirGlobal   pMac,
         isVHTEnabled = eANI_BOOLEAN_TRUE;
     }
 #endif
-
-    PopulateDot11fExtCap( pMac, isVHTEnabled, &pFrm->ExtCap, psessionEntry);
+    if (psessionEntry->is_ext_caps_present)
+        PopulateDot11fExtCap( pMac, isVHTEnabled, &pFrm->ExtCap, psessionEntry);
 
 #if defined WLAN_FEATURE_VOWIFI_11R
     if (psessionEntry->pLimJoinReq->is11Rconnection)
@@ -2539,7 +2541,8 @@ limSendReassocReqWithFTIEsMgmtFrame(tpAniSirGlobal     pMac,
             &frm.ExtSuppRates, psessionEntry );
 
 #if defined WLAN_FEATURE_VOWIFI
-    if (pMac->rrm.rrmPEContext.rrmEnable)
+    if (pMac->rrm.rrmPEContext.rrmEnable &&
+            SIR_MAC_GET_RRM(psessionEntry->limCurrentBssCaps))
         PopulateDot11fRRMIe(pMac, &frm.RRMEnabledCap, psessionEntry);
 #endif
 
@@ -2683,8 +2686,9 @@ limSendReassocReqWithFTIEsMgmtFrame(tpAniSirGlobal     pMac,
         limLog( pMac, LOG1, FL("Populate VHT IEs in Re-Assoc Request"));
         PopulateDot11fVHTCaps( pMac, psessionEntry, &frm.VHTCaps );
         isVHTEnabled = eANI_BOOLEAN_TRUE;
-        PopulateDot11fExtCap(pMac, isVHTEnabled, &frm.ExtCap, psessionEntry);
     }
+    if (psessionEntry->is_ext_caps_present)
+        PopulateDot11fExtCap(pMac, isVHTEnabled, &frm.ExtCap, psessionEntry);
 #endif
 
     nStatus = dot11fGetPackedReAssocRequestSize( pMac, &frm, &nPayload );
@@ -3043,7 +3047,8 @@ limSendReassocReqMgmtFrame(tpAniSirGlobal     pMac,
                                 &frm.ExtSuppRates, psessionEntry );
 
 #if defined WLAN_FEATURE_VOWIFI
-    if (pMac->rrm.rrmPEContext.rrmEnable)
+    if (pMac->rrm.rrmPEContext.rrmEnable &&
+            SIR_MAC_GET_RRM(psessionEntry->limCurrentBssCaps))
         PopulateDot11fRRMIe(pMac, &frm.RRMEnabledCap, psessionEntry);
 #endif
     // The join request *should* contain zero or one of the WPA and RSN
@@ -3114,7 +3119,8 @@ limSendReassocReqMgmtFrame(tpAniSirGlobal     pMac,
     }
 #endif
 
-    PopulateDot11fExtCap(pMac, isVHTEnabled, &frm.ExtCap, psessionEntry);
+    if (psessionEntry->is_ext_caps_present)
+        PopulateDot11fExtCap(pMac, isVHTEnabled, &frm.ExtCap, psessionEntry);
 
     nStatus = dot11fGetPackedReAssocRequestSize( pMac, &frm, &nPayload );
     if ( DOT11F_FAILED( nStatus ) )

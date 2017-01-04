@@ -766,30 +766,25 @@ limCleanupMlm(tpAniSirGlobal pMac)
      * each STA associated per BSSId and deactivate/delete
      * the pmfSaQueryTimer for it
      */
-    if (vos_is_logp_in_progress(VOS_MODULE_ID_PE, NULL))
+    for (bss_entry = 0; bss_entry < pMac->lim.maxBssId; bss_entry++)
     {
-        VOS_TRACE(VOS_MODULE_ID_PE, VOS_TRACE_LEVEL_ERROR,
-                  FL("SSR is detected, proceed to clean up pmfSaQueryTimer"));
-        for (bss_entry = 0; bss_entry < pMac->lim.maxBssId; bss_entry++)
-        {
-             if (pMac->lim.gpSession[bss_entry].valid)
+         if (pMac->lim.gpSession[bss_entry].valid)
+         {
+             for (sta_entry = 1; sta_entry < pMac->lim.gLimAssocStaLimit;
+                  sta_entry++)
              {
-                 for (sta_entry = 1; sta_entry < pMac->lim.gLimAssocStaLimit;
-                      sta_entry++)
-                 {
-                      psessionEntry = &pMac->lim.gpSession[bss_entry];
-                      pStaDs = dphGetHashEntry(pMac, sta_entry,
-                                              &psessionEntry->dph.dphHashTable);
-                      if (NULL == pStaDs)
-                      {
-                          continue;
-                      }
-                      VOS_TRACE(VOS_MODULE_ID_PE, VOS_TRACE_LEVEL_ERROR,
-                                FL("Deleting pmfSaQueryTimer for staid[%d]"),
-                                pStaDs->staIndex) ;
-                      tx_timer_deactivate(&pStaDs->pmfSaQueryTimer);
-                      tx_timer_delete(&pStaDs->pmfSaQueryTimer);
-                }
+                  psessionEntry = &pMac->lim.gpSession[bss_entry];
+                  pStaDs = dphGetHashEntry(pMac, sta_entry,
+                                          &psessionEntry->dph.dphHashTable);
+                  if (NULL == pStaDs)
+                  {
+                      continue;
+                  }
+                  VOS_TRACE(VOS_MODULE_ID_PE, VOS_TRACE_LEVEL_ERROR,
+                            FL("Deleting pmfSaQueryTimer for staid[%d]"),
+                            pStaDs->staIndex) ;
+                  tx_timer_deactivate(&pStaDs->pmfSaQueryTimer);
+                  tx_timer_delete(&pStaDs->pmfSaQueryTimer);
             }
         }
     }
@@ -7338,11 +7333,13 @@ void limPmfSaQueryTimerHandler(void *pMacGlobal, tANI_U32 param)
 
 #ifdef WLAN_FEATURE_11AC
 tANI_BOOLEAN limCheckVHTOpModeChange( tpAniSirGlobal pMac, tpPESession psessionEntry,
-                                      tANI_U8 chanWidth, tANI_U8 staId, tANI_U8 *peerMac)
+                                      tANI_U8 chanWidth, tANI_U8 chanMode,
+                                      tANI_U8 staId, tANI_U8 *peerMac)
 {
     tUpdateVHTOpMode tempParam;
 
     tempParam.opMode = chanWidth;
+    tempParam.chanMode = chanMode;
     tempParam.staId  = staId;
     tempParam.smesessionId = psessionEntry->smeSessionId;
     vos_mem_copy(tempParam.peer_mac, peerMac,
@@ -8738,5 +8735,37 @@ bool lim_is_robust_mgmt_action_frame(uint8_t action_catagory)
 		break;
 	}
 	return false;
+}
+
+/**
+ * lim_update_caps_info_for_bss - Update capability info for this BSS
+ *
+ * @mac_ctx: mac context
+ * @caps: Pointer to capability info to be updated
+ * @bss_caps: Capability info of the BSS
+ *
+ * Update the capability info in Assoc/Reassoc request frames and reset
+ * the spectrum management, short preamble, immediate block ack bits
+ * if the BSS doesnot support it
+ *
+ * Return: None
+ */
+void lim_update_caps_info_for_bss(tpAniSirGlobal mac_ctx,
+					uint16_t *caps, uint16_t bss_caps)
+{
+	if (!(bss_caps & LIM_SPECTRUM_MANAGEMENT_BIT_MASK)) {
+		*caps &= (~LIM_SPECTRUM_MANAGEMENT_BIT_MASK);
+		limLog(mac_ctx, LOG1, FL("Clearing spectrum management:no AP support"));
+	}
+
+	if (!(bss_caps & LIM_SHORT_PREAMBLE_BIT_MASK)) {
+		*caps &= (~LIM_SHORT_PREAMBLE_BIT_MASK);
+		limLog(mac_ctx, LOG1, FL("Clearing short preamble:no AP support"));
+	}
+
+	if (!(bss_caps & LIM_IMMEDIATE_BLOCK_ACK_MASK)) {
+		*caps &= (~LIM_IMMEDIATE_BLOCK_ACK_MASK);
+		limLog(mac_ctx, LOG1, FL("Clearing Immed Blk Ack:no AP support"));
+	}
 }
 

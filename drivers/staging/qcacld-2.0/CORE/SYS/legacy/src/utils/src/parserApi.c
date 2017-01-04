@@ -1721,7 +1721,8 @@ PopulateDot11fSuppRates(tpAniSirGlobal      pMac,
 tSirRetStatus
 populate_dot11f_rates_tdls(tpAniSirGlobal p_mac,
 			   tDot11fIESuppRates *p_supp_rates,
-			   tDot11fIEExtSuppRates *p_ext_supp_rates)
+			   tDot11fIEExtSuppRates *p_ext_supp_rates,
+			   uint8_t curr_oper_channel)
 {
 	tSirMacRateSet temp_rateset;
 	tSirMacRateSet temp_rateset2;
@@ -1731,15 +1732,23 @@ populate_dot11f_rates_tdls(tpAniSirGlobal p_mac,
 	wlan_cfgGetInt(p_mac, WNI_CFG_DOT11_MODE, &self_dot11mode);
 
 	/**
-         * Include 11b rates only when the device configured in
-	 * auto, 11a/b/g or 11b_only
-         */
-	if ((self_dot11mode == WNI_CFG_DOT11_MODE_ALL) ||
+	 * Include 11b rates only when the device configured in
+	 * auto, 11a/b/g or 11b_only and also if current base
+	 * channel is 5 GHz then no need to advertise the 11b rates.
+	 * If devices move to 2.4GHz off-channel then they can communicate
+	 * in 11g rates i.e. (6, 9, 12, 18, 24, 36 and 54).
+	 */
+	limLog(p_mac, LOG1,
+		FL("Current operating channel %d self_dot11mode = %d"),
+		curr_oper_channel, self_dot11mode);
+
+	if ((curr_oper_channel <= SIR_11B_CHANNEL_END) &&
+	    ((self_dot11mode == WNI_CFG_DOT11_MODE_ALL) ||
 	    (self_dot11mode == WNI_CFG_DOT11_MODE_11A) ||
 	    (self_dot11mode == WNI_CFG_DOT11_MODE_11AC) ||
 	    (self_dot11mode == WNI_CFG_DOT11_MODE_11N) ||
 	    (self_dot11mode == WNI_CFG_DOT11_MODE_11G) ||
-	    (self_dot11mode == WNI_CFG_DOT11_MODE_11B) ) {
+	    (self_dot11mode == WNI_CFG_DOT11_MODE_11B))) {
 		val = WNI_CFG_SUPPORTED_RATES_11B_LEN;
 		wlan_cfgGetStr(p_mac, WNI_CFG_SUPPORTED_RATES_11B,
 				(tANI_U8 *)&temp_rateset.rate, &val);
@@ -3672,6 +3681,11 @@ sirParseBeaconIE(tpAniSirGlobal        pMac,
     pBeaconStruct->Vendor1IEPresent = pBies->Vendor1IE.present;
     pBeaconStruct->Vendor2IEPresent = pBies->Vendor2IE.present;
     pBeaconStruct->Vendor3IEPresent = pBies->Vendor3IE.present;
+    if (pBies->ExtCap.present) {
+        pBeaconStruct->ExtCap.present = 1;
+        vos_mem_copy( &pBeaconStruct->ExtCap, &pBies->ExtCap,
+                sizeof(tDot11fIEExtCap));
+    }
 
     vos_mem_free(pBies);
     return eSIR_SUCCESS;
