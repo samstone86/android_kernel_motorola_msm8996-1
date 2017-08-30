@@ -193,6 +193,8 @@
 #define WLAN_HDD_MAX_FEATURE_SET   8
 
 #define IS_DFS_MODE_VALID(mode) ((mode >= DFS_MODE_NONE && mode <= DFS_MODE_DEPRIORITIZE))
+#define IS_CHANNEL_VALID(channel) ((channel >= 0 && channel < 15) \
+		|| (channel >= 36 && channel <= 184))
 
 #ifdef FEATURE_WLAN_EXTSCAN
 /*
@@ -802,7 +804,6 @@ wlan_hdd_extscan_config_policy[QCA_WLAN_VENDOR_ATTR_EXTSCAN_SUBCMD_CONFIG_PARAM_
 {
     [QCA_WLAN_VENDOR_ATTR_EXTSCAN_SUBCMD_CONFIG_PARAM_REQUEST_ID] = { .type = NLA_U32 },
     [QCA_WLAN_VENDOR_ATTR_EXTSCAN_GET_VALID_CHANNELS_CONFIG_PARAM_WIFI_BAND] = { .type = NLA_U32 },
-    [QCA_WLAN_VENDOR_ATTR_EXTSCAN_GET_VALID_CHANNELS_CONFIG_PARAM_MAX_CHANNELS] = { .type = NLA_U32 },
     [QCA_WLAN_VENDOR_ATTR_EXTSCAN_CHANNEL_SPEC_CHANNEL] = { .type = NLA_U32 },
     [QCA_WLAN_VENDOR_ATTR_EXTSCAN_CHANNEL_SPEC_DWELL_TIME] = { .type = NLA_U32 },
     [QCA_WLAN_VENDOR_ATTR_EXTSCAN_CHANNEL_SPEC_PASSIVE] = { .type = NLA_U8 },
@@ -838,7 +839,6 @@ wlan_hdd_extscan_config_policy[QCA_WLAN_VENDOR_ATTR_EXTSCAN_SUBCMD_CONFIG_PARAM_
     [QCA_WLAN_VENDOR_ATTR_EXTSCAN_SSID_THRESHOLD_PARAM_RSSI_LOW] = { .type = NLA_S32 },
     [QCA_WLAN_VENDOR_ATTR_EXTSCAN_SSID_THRESHOLD_PARAM_RSSI_HIGH] = { .type = NLA_S32 },
     [QCA_WLAN_VENDOR_ATTR_EXTSCAN_CONFIGURATION_FLAGS] = { .type = NLA_U32 },
-    [QCA_WLAN_VENDOR_ATTR_EXTSCAN_BSSID_HOTLIST_PARAMS_LOST_AP_SAMPLE_SIZE] = { .type = NLA_U32 },
 };
 
 static const struct nla_policy
@@ -4078,6 +4078,136 @@ static int wlan_hdd_cfg80211_extscan_stop(struct wiphy *wiphy,
 /*
  * done with short names for the global vendor params
  * used by wlan_hdd_cfg80211_extscan_stop()
+ */
+#undef PARAM_MAX
+#undef PARAM_REQUEST_ID
+
+static int __wlan_hdd_cfg80211_extscan_reset_bssid_hotlist(struct wiphy *wiphy,
+                                        struct wireless_dev *wdev,
+                                        const void *data,
+                                        int data_len)
+{
+    tpSirExtScanResetBssidHotlistReqParams pReqMsg = NULL;
+    struct net_device *dev                       = wdev->netdev;
+    hdd_adapter_t *pAdapter                      = WLAN_HDD_GET_PRIV_PTR(dev);
+    hdd_context_t *pHddCtx                       = wiphy_priv(wiphy);
+    struct nlattr *tb[QCA_WLAN_VENDOR_ATTR_EXTSCAN_SUBCMD_CONFIG_PARAM_MAX + 1];
+    struct hdd_ext_scan_context *context;
+    uint32_t request_id;
+    eHalStatus status;
+    int retval;
+    unsigned long rc;
+
+    ENTER();
+
+    if (VOS_FTM_MODE == hdd_get_conparam()) {
+        hddLog(LOGE, FL("Command not allowed in FTM mode"));
+        return -EINVAL;
+    }
+
+    retval = wlan_hdd_validate_context(pHddCtx);
+    if (0 != retval)
+        return -EINVAL;
+
+    if (!pHddCtx->cfg_ini->extscan_enabled) {
+        hddLog(LOGE, FL("extscan not supported"));
+        return -ENOTSUPP;
+    }
+    if (nla_parse(tb, QCA_WLAN_VENDOR_ATTR_EXTSCAN_SUBCMD_CONFIG_PARAM_MAX,
+                    data, data_len,
+                    wlan_hdd_extscan_config_policy)) {
+        hddLog(LOGE, FL("Invalid ATTR"));
+        return -EINVAL;
+    }
+
+    pReqMsg = vos_mem_malloc(sizeof(*pReqMsg));
+    if (!pReqMsg) {
+        hddLog(LOGE, FL("vos_mem_malloc failed"));
+        return -ENOMEM;
+    }
+
+    /* Parse and fetch request Id */
+    if (!tb[QCA_WLAN_VENDOR_ATTR_EXTSCAN_SUBCMD_CONFIG_PARAM_REQUEST_ID]) {
+        hddLog(LOGE, FL("attr request id failed"));
+        goto fail;
+    }
+
+    pReqMsg->requestId = nla_get_u32(
+              tb[QCA_WLAN_VENDOR_ATTR_EXTSCAN_SUBCMD_CONFIG_PARAM_REQUEST_ID]);
+
+    pReqMsg->sessionId = pAdapter->sessionId;
+    hddLog(LOG1, FL("Req Id %d Session Id %d"),
+                 pReqMsg->requestId, pReqMsg->sessionId);
+
+    context = &pHddCtx->ext_scan_context;
+    spin_lock(&hdd_context_lock);
+    INIT_COMPLETION(context->response_event);
+    context->request_id = request_id = pReqMsg->requestId;
+    spin_unlock(&hdd_context_lock);
+
+    status = sme_ResetBssHotlist(pHddCtx->hHal, pReqMsg);
+    if (!HAL_STATUS_SUCCESS(status)) {
+        hddLog(LOGE, FL("sme_ResetBssHotlist failed(err=%d)"), status);
+        goto fail;
+    }
+
+    /* request was sent -- wait for the response */
+    rc = wait_for_completion_timeout(&context->response_event,
+                                     msecs_to_jiffies(WLAN_WAIT_TIME_EXTSCAN));
+    if (!rc) {
+       hddLog(LOGE, FL("sme_ResetBssHotlist timed out"));
+       retval = -ETIMEDOUT;
+    } else {
+       spin_lock(&hdd_context_lock);
+       if (context->request_id == request_id)
+          retval = context->response_status;
+       else
+          retval = -EINVAL;
+       spin_unlock(&hdd_context_lock);
+    }
+    EXIT();
+    return retval;
+
+fail:
+    vos_mem_free(pReqMsg);
+    return -EINVAL;
+}
+
+/*
+ * define short names for the global vendor params
+ * used by wlan_hdd_cfg80211_extscan_reset_ssid_hotlist()
+ */
+#define PARAM_MAX \
+		QCA_WLAN_VENDOR_ATTR_EXTSCAN_SUBCMD_CONFIG_PARAM_MAX
+#define PARAM_REQUEST_ID \
+		QCA_WLAN_VENDOR_ATTR_EXTSCAN_SUBCMD_CONFIG_PARAM_REQUEST_ID
+
+/**
+ * wlan_hdd_cfg80211_extscan_reset_bssid_hotlist() - reset bssid hot list
+ * @wiphy: Pointer to wireless phy
+ * @wdev: Pointer to wireless device
+ * @data: Pointer to data
+ * @data_len: Data length
+ *
+ * Return: 0 on success, negative errno on failure
+ */
+static int wlan_hdd_cfg80211_extscan_reset_bssid_hotlist(struct wiphy *wiphy,
+                                        struct wireless_dev *wdev,
+                                        const void *data, int data_len)
+{
+	int ret = 0;
+
+	vos_ssr_protect(__func__);
+	ret = __wlan_hdd_cfg80211_extscan_reset_bssid_hotlist(wiphy, wdev,
+								data, data_len);
+	vos_ssr_unprotect(__func__);
+
+	return ret;
+}
+
+/*
+ * done with short names for the global vendor params
+ * used by wlan_hdd_cfg80211_extscan_reset_ssid_hotlist()
  */
 #undef PARAM_MAX
 #undef PARAM_REQUEST_ID
@@ -10042,7 +10172,7 @@ __wlan_hdd_cfg80211_bpf_offload(struct wiphy *wiphy,
 	}
 
 	if (!hdd_ctx->bpf_enabled) {
-		hddLog(LOGE, FL("BPF offload is not supported by firmware"));
+		hddLog(LOGE, FL("BPF offload is not supported/enabled"));
 		return -ENOTSUPP;
 	}
 
@@ -11183,6 +11313,14 @@ const struct wiphy_vendor_command hdd_wiphy_vendor_commands[] =
                  WIPHY_VENDOR_CMD_NEED_NETDEV |
                  WIPHY_VENDOR_CMD_NEED_RUNNING,
         .doit = wlan_hdd_cfg80211_extscan_set_bssid_hotlist
+    },
+    {
+        .info.vendor_id = QCA_NL80211_VENDOR_ID,
+        .info.subcmd = QCA_NL80211_VENDOR_SUBCMD_EXTSCAN_RESET_BSSID_HOTLIST,
+        .flags = WIPHY_VENDOR_CMD_NEED_WDEV |
+                 WIPHY_VENDOR_CMD_NEED_NETDEV |
+                 WIPHY_VENDOR_CMD_NEED_RUNNING,
+        .doit = wlan_hdd_cfg80211_extscan_reset_bssid_hotlist
     },
     {
         .info.vendor_id = QCA_NL80211_VENDOR_ID,
@@ -12467,7 +12605,7 @@ static void wlan_hdd_add_hostapd_conf_vsie(hdd_adapter_t* pHostapdAdapter,
         elem_id  = ptr[0];
         elem_len = ptr[1];
         left -= 2;
-        if (elem_len > left || elem_len < WPS_OUI_TYPE_SIZE)
+        if (elem_len > left)
         {
             hddLog( VOS_TRACE_LEVEL_ERROR,
                     "****Invalid IEs eid = %d elem_len=%d left=%d*****",
@@ -13776,35 +13914,6 @@ static int wlan_hdd_cfg80211_start_bss(hdd_adapter_t *pHostapdAdapter,
         {
             vos_mem_copy(&pConfig->accept_mac[i], acl_entry->addr, sizeof(qcmacaddr));
             acl_entry++;
-        }
-    }
-    if (!pHddCtx->cfg_ini->force_sap_acs) {
-        pIe = wlan_hdd_cfg80211_get_ie_ptr(&pMgmt_frame->u.beacon.variable[0],
-                pBeacon->head_len, WLAN_EID_SUPP_RATES);
-        if (pIe != NULL) {
-            pIe++;
-            pConfig->supported_rates.numRates = pIe[0];
-            pIe++;
-            for (i = 0; i < pConfig->supported_rates.numRates; i++)
-                if (pIe[i]) {
-                    pConfig->supported_rates.rate[i]= pIe[i];
-                    hddLog(LOG1, FL("Configured Supported rate is %2x"),
-                            pConfig->supported_rates.rate[i]);
-                }
-        }
-        pIe = wlan_hdd_cfg80211_get_ie_ptr(pBeacon->tail, pBeacon->tail_len,
-                WLAN_EID_EXT_SUPP_RATES);
-        if (pIe != NULL) {
-            pIe++;
-            pConfig->extended_rates.numRates = pIe[0];
-            pIe++;
-            for (i = 0; i < pConfig->extended_rates.numRates; i++)
-                if (pIe[i]) {
-                    pConfig->extended_rates.rate[i]= pIe[i];
-                    hddLog(LOG1,
-                            FL("Configured extended Supported rate is %2x"),
-                            pConfig->extended_rates.rate[i]);
-                }
         }
     }
 
@@ -15522,15 +15631,9 @@ static int __wlan_hdd_change_station(struct wiphy *wiphy,
             StaParams.supported_oper_classes_len  =
                                              params->supported_oper_classes_len;
 
-            if (params->ext_capab_len > sizeof(StaParams.extn_capability)) {
-                VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
-                          "received extn capabilities:%d, resetting it to max supported",
-                          params->ext_capab_len);
-                params->ext_capab_len = sizeof(StaParams.extn_capability);
-            }
             if (0 != params->ext_capab_len)
                 vos_mem_copy(StaParams.extn_capability, params->ext_capab,
-                             params->ext_capab_len);
+                             sizeof(StaParams.extn_capability));
 
             if (NULL != params->ht_capa) {
                 StaParams.htcap_present = 1;
@@ -15579,7 +15682,8 @@ static int __wlan_hdd_change_station(struct wiphy *wiphy,
             }
 
             if (pHddCtx->cfg_ini->fEnableTDLSWmmMode &&
-                (params->sta_flags_set & BIT(NL80211_STA_FLAG_WME)))
+                (params->ht_capa || params->vht_capa ||
+                (params->sta_flags_set & BIT(NL80211_STA_FLAG_WME))))
                 is_qos_wmm_sta = true;
 
             hddLog(VOS_TRACE_LEVEL_INFO,
@@ -16492,14 +16596,7 @@ wlan_hdd_cfg80211_inform_bss_frame( hdd_adapter_t *pAdapter,
     qie_age->oui_2      = QCOM_OUI2;
     qie_age->oui_3      = QCOM_OUI3;
     qie_age->type       = QCOM_VENDOR_IE_AGE_TYPE;
-    /*
-     * Lowi expects the timestamp of bss in units of 1/10 ms. In driver all
-     * bss related timestamp is in units of ms. Due to this when scan results
-     * are sent to lowi the scan age is high.To address this, send age in units
-     * of 1/10 ms.
-     */
-    qie_age->age        = (vos_timer_get_system_time() -
-                                 bss_desc->nReceivedTime)/10;
+    qie_age->age        = vos_timer_get_system_time() - bss_desc->nReceivedTime;
     qie_age->tsf_delta  = bss_desc->tsf_delta;
 #endif
 
@@ -17624,16 +17721,20 @@ int wlan_hdd_cfg80211_scan( struct wiphy *wiphy,
 }
 
 void hdd_select_cbmode(hdd_adapter_t *pAdapter, v_U8_t operationChannel,
-                       uint16_t *vht_channel_width)
+                uint16_t *vht_channel_width)
 {
     v_U8_t iniDot11Mode =
                (WLAN_HDD_GET_CTX(pAdapter))->cfg_ini->dot11Mode;
     eHddDot11Mode   hddDot11Mode = iniDot11Mode;
+    hdd_station_ctx_t *station_ctx = WLAN_HDD_GET_STATION_CTX_PTR(pAdapter);
+    uint32_t cb_mode;
+    struct hdd_mon_set_ch_info *ch_info = &station_ctx->ch_info;
 
     hddLog(LOG1, FL("Channel Bonding Mode Selected is %u"),
            iniDot11Mode);
-    *vht_channel_width =
-               (WLAN_HDD_GET_CTX(pAdapter))->cfg_ini->vhtChannelWidth;
+    if (VOS_MONITOR_MODE != hdd_get_conparam())
+        *vht_channel_width =
+                  (WLAN_HDD_GET_CTX(pAdapter))->cfg_ini->vhtChannelWidth;
 
     /*
      * In IBSS mode while operating in 2.4 GHz,
@@ -17666,71 +17767,21 @@ void hdd_select_cbmode(hdd_adapter_t *pAdapter, v_U8_t operationChannel,
           break;
     }
      /* This call decides required channel bonding mode */
-    sme_SelectCBMode((WLAN_HDD_GET_CTX(pAdapter)->hHal),
+    cb_mode = sme_SelectCBMode((WLAN_HDD_GET_CTX(pAdapter)->hHal),
                      hdd_cfg_xlate_to_csr_phy_mode(hddDot11Mode),
                      operationChannel, 0,
                      vht_channel_width,
                      *vht_channel_width);
-}
 
-/**
- * hdd_select_mon_cbmode() - This function will handle channel bonding mode
-                             for monitor mode.
- * @adapter: pointer to hdd adapter.
- * @operation_channel: operating channel.
- * @vht_channel_width: pointer to channel width.
- *
- *
- * Return: None.
- */
-void hdd_select_mon_cbmode(hdd_adapter_t *adapter, v_U8_t operation_channel,
-                uint16_t *vht_channel_width)
-{
-    v_U8_t ini_dot11_mode = (WLAN_HDD_GET_CTX(adapter))->cfg_ini->dot11Mode;
-    eHddDot11Mode   hdd_dot11_mode = ini_dot11_mode;
-    hdd_station_ctx_t *station_ctx = WLAN_HDD_GET_STATION_CTX_PTR(adapter);
-    uint32_t cb_mode;
-    struct hdd_mon_set_ch_info *ch_info = &station_ctx->ch_info;
-
-    hddLog(LOG1, FL("Channel Bonding Mode Selected is %u"), ini_dot11_mode);
-
-    switch ( ini_dot11_mode )
-    {
-       case eHDD_DOT11_MODE_AUTO:
-       case eHDD_DOT11_MODE_11ac:
-       case eHDD_DOT11_MODE_11ac_ONLY:
-#ifdef WLAN_FEATURE_11AC
-          if (sme_IsFeatureSupportedByFW(DOT11AC))
-              hdd_dot11_mode = eHDD_DOT11_MODE_11ac;
-          else
-              hdd_dot11_mode = eHDD_DOT11_MODE_11n;
-#else
-          hdd_dot11_mode = eHDD_DOT11_MODE_11n;
-#endif
-          break;
-       case eHDD_DOT11_MODE_11n:
-       case eHDD_DOT11_MODE_11n_ONLY:
-          hdd_dot11_mode = eHDD_DOT11_MODE_11n;
-          break;
-       default:
-          hdd_dot11_mode = ini_dot11_mode;
-          break;
+    if (VOS_MONITOR_MODE == hdd_get_conparam()) {
+        ch_info->channel_width = *vht_channel_width;
+        ch_info->phy_mode = hdd_cfg_xlate_to_csr_phy_mode(hddDot11Mode);
+        ch_info->channel = operationChannel;
+        ch_info->cb_mode = cb_mode;
+        hddLog(LOG1, FL("ch_info width %d, phymode %d channel %d"),
+               ch_info->channel_width, ch_info->phy_mode, ch_info->channel);
     }
-    /* This call decides required channel bonding mode */
-    cb_mode = sme_SelectCBMode((WLAN_HDD_GET_CTX(adapter)->hHal),
-                     hdd_cfg_xlate_to_csr_phy_mode(hdd_dot11_mode),
-                     operation_channel, 0,
-                     vht_channel_width,
-                     *vht_channel_width);
-
-    ch_info->channel_width = *vht_channel_width;
-    ch_info->phy_mode = hdd_cfg_xlate_to_csr_phy_mode(hdd_dot11_mode);
-    ch_info->channel = operation_channel;
-    ch_info->cb_mode = cb_mode;
-    hddLog(LOG1, FL("ch_info width %d, phymode %d channel %d"),
-           ch_info->channel_width, ch_info->phy_mode, ch_info->channel);
 }
-
 
 /**
  * wlan_hdd_sta_sap_concur_handle() - This function will handle Station and sap
@@ -18444,13 +18495,6 @@ int wlan_hdd_cfg80211_set_ie(hdd_adapter_t *pAdapter,
         eLen  = *genie++;
         remLen -= 2;
 
-        /* Sanity check on eLen */
-        if (eLen > remLen) {
-            hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Invalid IE length[%d] for IE[0x%X]",
-                    __func__, eLen, elementId);
-            VOS_ASSERT(0);
-            return -EINVAL;
-        }
         hddLog(VOS_TRACE_LEVEL_INFO, "%s: IE[0x%X], LEN[%d]",
             __func__, elementId, eLen);
 
@@ -18487,13 +18531,6 @@ int wlan_hdd_cfg80211_set_ie(hdd_adapter_t *pAdapter,
                 }
                 else if (0 == memcmp(&genie[0], "\x00\x50\xf2", 3))
                 {
-                    if (eLen > (MAX_WPA_RSN_IE_LEN - 2)) {
-                        hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Invalid WPA RSN IE length[%d], exceeds %d bytes",
-                                __func__, eLen, MAX_WPA_RSN_IE_LEN - 2);
-                        VOS_ASSERT(0);
-                        return -EINVAL;
-                    }
-
                     hddLog (VOS_TRACE_LEVEL_INFO, "%s Set WPA IE (len %d)",__func__, eLen + 2);
                     memset( pWextState->WPARSNIE, 0, MAX_WPA_RSN_IE_LEN );
                     memcpy( pWextState->WPARSNIE, genie - 2, (eLen + 2) /*ie_len*/);

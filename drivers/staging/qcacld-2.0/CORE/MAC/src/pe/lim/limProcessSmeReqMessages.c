@@ -83,8 +83,8 @@
 
 #define CONV_MS_TO_US 1024 //conversion factor from ms to us
 
-#define BEACON_INTERVAL_THRESHOLD 50  /* in msecs */
-#define STA_BURST_SCAN_DURATION 120   /* in msecs */
+#define BEACON_INTERVAL_THRESHOLD 50 //in msecs
+#define STA_BURST_SCAN_DURATION 120 //in msecs
 
 // SME REQ processing function templates
 static void __limProcessSmeStartReq(tpAniSirGlobal, tANI_U32 *);
@@ -1306,12 +1306,14 @@ static eHalStatus limSendHalStartScanOffloadReq(tpAniSirGlobal pMac,
     pScanOffloadReq->min_rest_time= pScanReq->min_rest_time;
     pScanOffloadReq->idle_time= pScanReq->idle_time;
 
-    for (i = 0; i < pMac->lim.maxBssId; i++) {
-        tpPESession session_entry = peFindSessionBySessionId(pMac,i);
-        if (session_entry &&
-            (eLIM_MLM_LINK_ESTABLISHED_STATE == session_entry->limMlmState) &&
-            (session_entry->beaconParams.beaconInterval
-                                      < BEACON_INTERVAL_THRESHOLD)) {
+    for (i=0;i<pMac->lim.maxBssId;i++)
+    {
+        tpPESession psessionEntry = peFindSessionBySessionId(pMac,i);
+        if (psessionEntry && psessionEntry->valid &&
+            (eLIM_MLM_LINK_ESTABLISHED_STATE == psessionEntry->limMlmState) &&
+            psessionEntry->beaconParams.beaconInterval
+                                                  < BEACON_INTERVAL_THRESHOLD)
+        {
             pScanOffloadReq->burst_scan_duration = STA_BURST_SCAN_DURATION;
             break;
         }
@@ -2019,7 +2021,9 @@ __limProcessSmeJoinReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
 
 
         /* Store vendor specfic IE for CISCO AP */
-        ieLen = GET_IE_LEN_IN_BSS(pSmeJoinReq->bssDescription.length);
+        ieLen = (pSmeJoinReq->bssDescription.length +
+                  sizeof( pSmeJoinReq->bssDescription.length ) -
+                  GET_FIELD_OFFSET( tSirBssDescription, ieFields ));
 
         vendorIE = cfg_get_vendor_ie_ptr_from_oui(pMac, SIR_MAC_CISCO_OUI,
                     SIR_MAC_CISCO_OUI_SIZE,
@@ -2261,8 +2265,8 @@ __limProcessSmeJoinReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
         {
            limExtractApCapability( pMac,
               (tANI_U8 *) psessionEntry->pLimJoinReq->bssDescription.ieFields,
-              GET_IE_LEN_IN_BSS(
-              psessionEntry->pLimJoinReq->bssDescription.length),
+              limGetIElenFromBssDescription(
+              &psessionEntry->pLimJoinReq->bssDescription),
               &psessionEntry->limCurrentBssQosCaps,
               &psessionEntry->limCurrentBssPropCap,
               &pMac->lim.gLimCurrentBssUapsd
@@ -2274,8 +2278,8 @@ __limProcessSmeJoinReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
         {
            limExtractApCapability( pMac,
               (tANI_U8 *) psessionEntry->pLimJoinReq->bssDescription.ieFields,
-              GET_IE_LEN_IN_BSS(
-              psessionEntry->pLimJoinReq->bssDescription.length),
+              limGetIElenFromBssDescription(
+              &psessionEntry->pLimJoinReq->bssDescription),
               &psessionEntry->limCurrentBssQosCaps,
               &psessionEntry->limCurrentBssPropCap,
               &psessionEntry->gLimCurrentBssUapsd,
@@ -2624,8 +2628,8 @@ __limProcessSmeReassocReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
     {
         limExtractApCapability( pMac,
             (tANI_U8 *) psessionEntry->pLimReAssocReq->bssDescription.ieFields,
-            GET_IE_LEN_IN_BSS(
-            psessionEntry->pLimReAssocReq->bssDescription.length),
+            limGetIElenFromBssDescription(
+                     &psessionEntry->pLimReAssocReq->bssDescription),
             &psessionEntry->limReassocBssQosCaps,
             &psessionEntry->limReassocBssPropCap,
             &pMac->lim.gLimCurrentBssUapsd
@@ -2637,8 +2641,8 @@ __limProcessSmeReassocReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
     {
         limExtractApCapability(pMac,
             (tANI_U8 *) psessionEntry->pLimReAssocReq->bssDescription.ieFields,
-            GET_IE_LEN_IN_BSS(
-            psessionEntry->pLimReAssocReq->bssDescription.length),
+            limGetIElenFromBssDescription(
+                     &psessionEntry->pLimReAssocReq->bssDescription),
             &psessionEntry->limReassocBssQosCaps,
             &psessionEntry->limReassocBssPropCap,
             &psessionEntry->gLimCurrentBssUapsd,
@@ -2762,6 +2766,13 @@ __limProcessSmeReassocReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
           limLog(pMac, LOGP, FL("could not retrieve ListenInterval"));
        }
     }
+
+    /* Delete all BA sessions before Re-Assoc.
+     *  BA frames are class 3 frames and the session
+     *  is lost upon disassociation and reassociation.
+     */
+
+    limDeleteBASessions(pMac, psessionEntry, BA_BOTH_DIRECTIONS);
 
     pMlmReassocReq->listenInterval = (tANI_U16) val;
 
@@ -5259,6 +5270,49 @@ static void __limProcessSmeSetHT2040Mode(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
 }
 #endif
 
+/** -------------------------------------------------------------
+\fn limProcessSmeDelBaPeerInd
+\brief handles indication message from HDD to send delete BA request
+\param   tpAniSirGlobal pMac
+\param   tANI_U32 pMsgBuf
+\return None
+-------------------------------------------------------------*/
+void
+limProcessSmeDelBaPeerInd(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
+{
+    tANI_U16            assocId =0;
+    tpSmeDelBAPeerInd   pSmeDelBAPeerInd = (tpSmeDelBAPeerInd)pMsgBuf;
+    tpDphHashNode       pSta;
+    tpPESession         psessionEntry;
+    tANI_U8             sessionId;
+
+
+
+    if(NULL == pSmeDelBAPeerInd)
+        return;
+
+    if ((psessionEntry = peFindSessionByBssid(pMac,pSmeDelBAPeerInd->bssId,&sessionId))==NULL)
+    {
+        limLog(pMac, LOGE,FL("session does not exist for given bssId"));
+        return;
+    }
+    limLog(pMac, LOGW, FL("called with staId = %d, tid = %d, baDirection = %d"),
+              pSmeDelBAPeerInd->staIdx, pSmeDelBAPeerInd->baTID, pSmeDelBAPeerInd->baDirection);
+
+    pSta = dphLookupAssocId(pMac, pSmeDelBAPeerInd->staIdx, &assocId, &psessionEntry->dph.dphHashTable);
+    if( eSIR_SUCCESS != limPostMlmDelBAReq( pMac,
+          pSta,
+          pSmeDelBAPeerInd->baDirection,
+          pSmeDelBAPeerInd->baTID,
+          eSIR_MAC_UNSPEC_FAILURE_REASON,psessionEntry))
+    {
+      limLog( pMac, LOGW,
+          FL( "Failed to post LIM_MLM_DELBA_REQ to " ));
+      if (pSta)
+          limPrintMacAddr(pMac, pSta->staAddr, LOGW);
+    }
+}
+
 // --------------------------------------------------------------------
 /**
  * __limProcessReportMessage
@@ -6210,6 +6264,9 @@ limProcessSmeReqMessages(tpAniSirGlobal pMac, tpSirMsgQ pMsg)
             bufConsumed = FALSE;
             break;
 #endif /* FEATURE_WLAN_ESE && FEATURE_WLAN_ESE_UPLOAD */
+        case eWNI_SME_DEL_BA_PEER_IND:
+            limProcessSmeDelBaPeerInd(pMac, pMsgBuf);
+            break;
         case eWNI_SME_GET_SCANNED_CHANNEL_REQ:
             limProcessSmeGetScanChannelInfo(pMac, pMsgBuf);
             break;

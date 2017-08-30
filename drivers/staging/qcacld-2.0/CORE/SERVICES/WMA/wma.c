@@ -7253,6 +7253,8 @@ VOS_STATUS WDA_open(v_VOID_t *vos_context, v_VOID_t *os_ctx,
 	wma_handle->ssdp = mac_params->ssdp;
 	wma_handle->enable_mc_list = mac_params->enable_mc_list;
 	wma_handle->enable_bcst_ptrn = mac_params->enable_bcst_ptrn;
+	wma_handle->bpf_packet_filter_enable =
+		mac_params->bpf_packet_filter_enable;
 #ifdef FEATURE_WLAN_RA_FILTERING
 	wma_handle->IsRArateLimitEnabled = mac_params->IsRArateLimitEnabled;
 	wma_handle->RArateLimitInterval = mac_params->RArateLimitInterval;
@@ -9106,12 +9108,9 @@ VOS_STATUS wma_get_buf_start_scan_cmd(tp_wma_handle wma_handle,
 		    if (wma_is_STA_active(wma_handle) ||
 			wma_is_P2P_CLI_active(wma_handle)) {
 			if (scan_req->burst_scan_duration)
-				cmd->burst_duration =
-						scan_req->burst_scan_duration;
+				cmd->burst_duration = scan_req->burst_scan_duration;
 			else
-				/* Typical background scan.
-				 * Disable burst scan for now.
-				 */
+			/* Typical background scan. Disable burst scan for now. */
 				cmd->burst_duration = 0;
 			break;
 		    }
@@ -12694,6 +12693,8 @@ void wma_vdev_resp_timer(void *data)
 		}
 		WMA_LOGI("%s: bssid %pM vdev_id %d", __func__, params->bssId,
 						tgt_req->vdev_id);
+		wma_send_msg(wma, WDA_ADD_BSS_RSP, (void *)params, 0);
+		goto free_tgt_req;
 error0:
 		if (peer)
 			wma_remove_peer(wma, params->bssId,
@@ -13499,7 +13500,8 @@ static int32_t wmi_unified_send_peer_assoc(tp_wma_handle wma,
 	 * Limit nss to max number of rf chain supported by target
 	 * Otherwise Fw will crash
 	 */
-	wma_update_txrx_chainmask(wma->num_rf_chains, &cmd->peer_nss);
+	if (!wma->per_band_chainmask_supp)
+		wma_update_txrx_chainmask(wma->num_rf_chains, &cmd->peer_nss);
 
 	intr->nss = cmd->peer_nss;
 	cmd->peer_phymode = phymode;
@@ -14405,13 +14407,10 @@ static void wma_process_cli_set_cmd(tp_wma_handle wma,
 		WMA_LOGD("pdev pid %d pval %d", privcmd->param_id,
 				privcmd->param_value);
 		if ((privcmd->param_id == WMI_PDEV_PARAM_RX_CHAIN_MASK) ||
-		   (privcmd->param_id == WMI_PDEV_PARAM_TX_CHAIN_MASK) ||
-		   (privcmd->param_id == WMI_PDEV_PARAM_RX_CHAIN_MASK_2G) ||
-		   (privcmd->param_id == WMI_PDEV_PARAM_TX_CHAIN_MASK_2G) ||
-		   (privcmd->param_id == WMI_PDEV_PARAM_RX_CHAIN_MASK_5G) ||
-		   (privcmd->param_id == WMI_PDEV_PARAM_TX_CHAIN_MASK_5G))
+			(privcmd->param_id == WMI_PDEV_PARAM_TX_CHAIN_MASK)) {
 			wma_update_txrx_chainmask(wma->num_rf_chains,
 						&privcmd->param_value);
+		}
 
 		ret = wmi_unified_pdev_set_param(wma->wmi_handle,
 						privcmd->param_id,
@@ -23069,15 +23068,7 @@ static VOS_STATUS wma_suspend_req(tp_wma_handle wma, tpSirWlanSuspendParam info)
 	 * suspend indication received on last vdev before
 	 * enabling wow in fw.
 	 */
-	/*
-	 * While processing suspend indication, there is possibility of
-	 * vdev(SAP/P2P-GO) deletion due to stop_ap. This may lead, Host to
-	 * send WoW indication twice to FW, as vdev is one but HDD sends
-	 * suspend indication twice to WMA. To fix this race condition check
-	 * for wow_enable along with vdev count.
-	 */
-	if (wma->no_of_suspend_ind < wma_get_vdev_count(wma) ||
-		wma->wow.wow_enable) {
+	if (wma->no_of_suspend_ind < wma_get_vdev_count(wma)) {
 		vos_mem_free(info);
 		return VOS_STATUS_SUCCESS;
 	}
@@ -33473,6 +33464,20 @@ static inline void wma_update_target_vht_cap(tp_wma_handle wh,
 }
 #endif	/* #ifdef WLAN_FEATURE_11AC */
 
+#ifdef FEATURE_WLAN_RA_FILTERING
+static void wma_update_ra_rate_limit(tp_wma_handle wma_handle,
+				     struct hdd_tgt_cfg *cfg)
+{
+	cfg->is_ra_rate_limit_enabled = wma_handle->IsRArateLimitEnabled;
+}
+#else
+static void wma_update_ra_rate_limit(tp_wma_handle wma_handle,
+				     struct hdd_tgt_cfg *cfg)
+{
+}
+#endif
+
+
 static void wma_update_hdd_cfg(tp_wma_handle wma_handle)
 {
 	struct hdd_tgt_cfg hdd_tgt_cfg;
@@ -33519,6 +33524,7 @@ static void wma_update_hdd_cfg(tp_wma_handle wma_handle)
 	hdd_tgt_cfg.wmi_max_len = wmi_get_max_msg_len(wma_handle->wmi_handle)
 					- WMI_TLV_HEADROOM;
 	hdd_tgt_cfg.bpf_enabled = wma_handle->bpf_enabled;
+	wma_update_ra_rate_limit(wma_handle, &hdd_tgt_cfg);
 	wma_update_hdd_cfg_ndp(wma_handle, &hdd_tgt_cfg);
 	wma_setup_egap_support(&hdd_tgt_cfg, wma_handle);
         hdd_tgt_cfg.max_mc_addr_list =
@@ -33700,6 +33706,19 @@ static void wma_send_time_stamp_sync_cmd(void *data)
 		WMA_LOGE("Failed to start the firmware time sync timer");
 }
 
+#ifdef FEATURE_WLAN_RA_FILTERING
+static void wma_update_ra_limit(tp_wma_handle wma_handle)
+{
+	if (wma_handle->bpf_enabled)
+		wma_handle->IsRArateLimitEnabled = false;
+}
+#else
+static void wma_update_ra__limit(tp_wma_handle handle)
+{
+}
+#endif
+
+
 /* Process service ready event and send wmi_init command */
 v_VOID_t wma_rx_service_ready_event(WMA_HANDLE handle, void *cmd_param_info)
 {
@@ -33790,9 +33809,10 @@ v_VOID_t wma_rx_service_ready_event(WMA_HANDLE handle, void *cmd_param_info)
 	wma_handle->ap_arpns_support =
 		WMI_SERVICE_IS_ENABLED(wma_handle->wmi_service_bitmap,
 					WMI_SERVICE_AP_ARPNS_OFFLOAD);
-	wma_handle->bpf_enabled =
+	wma_handle->bpf_enabled = (wma_handle->bpf_packet_filter_enable &&
 		WMI_SERVICE_IS_ENABLED(wma_handle->wmi_service_bitmap,
-					WMI_SERVICE_BPF_OFFLOAD);
+					WMI_SERVICE_BPF_OFFLOAD));
+	wma_update_ra_limit(wma_handle);
 	if (WMI_SERVICE_IS_ENABLED(wma_handle->wmi_service_bitmap,
 				WMI_SERVICE_CSA_OFFLOAD)) {
 		WMA_LOGD("%s: FW support CSA offload capability", __func__);
@@ -36246,7 +36266,7 @@ int wma_dfs_indicate_radar(struct ieee80211com *ic,
 	    ( pmac->sap.SapDfsInfo.disable_dfs_ch_switch == VOS_TRUE) )
 	{
 		radar_event = (struct wma_dfs_radar_indication *)
-			vos_mem_malloc(sizeof(struct wma_dfs_radar_indication));
+			vos_mem_malloc(sizeof(*radar_event));
 		if (radar_event == NULL) {
 			WMA_LOGE(FL("Failed to allocate memory for radar_event"));
 			adf_os_spin_unlock_bh(&ic->chan_lock);

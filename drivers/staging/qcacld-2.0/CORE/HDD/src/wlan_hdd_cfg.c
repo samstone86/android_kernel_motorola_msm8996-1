@@ -4700,6 +4700,13 @@ REG_TABLE_ENTRY g_registry_table[] =
                 CFG_SIFS_BURST_DURATION_DEFAULT,
                 CFG_SIFS_BURST_DURATION_MIN,
                 CFG_SIFS_BURST_DURATION_MAX),
+
+  REG_VARIABLE(CFG_BPF_PACKET_FILTER_OFFLOAD, WLAN_PARAM_Integer,
+               struct hdd_config, bpf_packet_filter_enable,
+               VAR_FLAGS_OPTIONAL | VAR_FLAGS_RANGE_CHECK_ASSUME_DEFAULT,
+               CFG_BPF_PACKET_FILTER_OFFLOAD_DEFAULT,
+               CFG_BPF_PACKET_FILTER_OFFLOAD_MIN,
+               CFG_BPF_PACKET_FILTER_OFFLOAD_MAX),
 };
 
 
@@ -4778,8 +4785,8 @@ static char *i_trim(char *str)
 
    /* Find the first non white-space*/
    for (ptr = str; i_isspace(*ptr); ptr++);
-   if (*ptr == '\0')
-      return str;
+      if (*ptr == '\0')
+         return str;
 
    /* This is the new start of the string*/
    str = ptr;
@@ -4787,8 +4794,8 @@ static char *i_trim(char *str)
    /* Find the last non white-space */
    ptr += strlen(ptr) - 1;
    for (; ptr != str && i_isspace(*ptr); ptr--);
-   /* Null terminate the following character */
-   ptr[1] = '\0';
+      /* Null terminate the following character */
+      ptr[1] = '\0';
 
    return str;
 }
@@ -5546,6 +5553,10 @@ void print_hdd_cfg(hdd_context_t *pHddCtx)
   hddLog(LOG2, "Name = [%s] Value = [%u]",
                  CFG_ACTIVE_MODE_OFFLOAD,
                  pHddCtx->cfg_ini->active_mode_offload);
+
+  hddLog(LOG2, "Name = [%s] Value = [%u]",
+                 CFG_BPF_PACKET_FILTER_OFFLOAD,
+                 pHddCtx->cfg_ini->bpf_packet_filter_enable);
 
   hdd_ndp_print_ini_config(pHddCtx);
 }
@@ -6860,10 +6871,6 @@ v_BOOL_t hdd_update_config_dat( hdd_context_t *pHddCtx )
 #if defined WLAN_FEATURE_VOWIFI
     if (ccmCfgSetInt(pHddCtx->hHal, WNI_CFG_MCAST_BCAST_FILTER_SETTING, pConfig->mcastBcastFilterSetting,
                      NULL, eANI_BOOLEAN_FALSE)==eHAL_STATUS_FAILURE)
-     {
-        fStatus = FALSE;
-        hddLog(LOGE,"Failure: Could not pass on WNI_CFG_MCAST_BCAST_FILTER_SETTING configuration info to CCM");
-     }
 #endif
 
      if (ccmCfgSetInt(pHddCtx->hHal, WNI_CFG_SINGLE_TID_RC, pConfig->bSingleTidRc,

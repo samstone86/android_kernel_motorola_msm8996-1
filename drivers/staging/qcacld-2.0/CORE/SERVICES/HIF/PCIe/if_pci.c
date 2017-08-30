@@ -2724,40 +2724,29 @@ void hif_pci_crash_shutdown(struct pci_dev *pdev)
 #define OL_ATH_PCI_PM_CONTROL 0x44
 
 /**
- * hif_disable_tasklet_noclient() - API to disable tasklet in D3WOW
+ * hif_disable_tasklet() - API to disable tasklet
  * @sc: HIF Context
  * @wma_hdl: WMA Handle
  *
- * This API allows to disable the tasklet in D3-wow
- * cases.
- *
  * Return: None
  */
-static void hif_disable_tasklet_noclient(struct hif_pci_softc *sc,
-			void *wma_hdl)
+static void hif_disable_tasklet(struct hif_pci_softc *sc, void *wma_hdl)
 {
-	if (!wma_get_client_count(wma_hdl)) {
+	if (!wma_get_client_count(wma_hdl))
 		tasklet_disable(&sc->intr_tq);
-		pr_debug("%s: tasklet disabled\n", __func__);
-	}
 }
 
 /**
- * hif_enable_tasklet_noclient() - API to enable tasklet in D3WOW
+ * hif_enable_tasklet() - API to enable tasklet
  * @sc: HIF Context
  * @wma_hdl: WMA Handle
  *
- * This API allows to enable the tasklet in D3-wow
- * cases.
- *
  * Return: None
  */
-static void hif_enable_tasklet_noclient(struct hif_pci_softc *sc, void *wma_hdl)
+static void hif_enable_tasklet(struct hif_pci_softc *sc, void *wma_hdl)
 {
-	if (!wma_get_client_count(wma_hdl)) {
+	if (!wma_get_client_count(wma_hdl))
 		tasklet_enable(&sc->intr_tq);
-		pr_debug("%s: tasklet disabled\n", __func__);
-	}
 }
 
 static int
@@ -2837,7 +2826,7 @@ __hif_pci_suspend(struct pci_dev *pdev, pm_message_t state, bool runtime_pm)
         msleep(10);
     }
 
-    hif_disable_tasklet_noclient(sc, temp_module);
+    hif_disable_tasklet(sc, temp_module);
     hif_irq_record(HIF_SUSPEND_AFTER_WOW, sc);
 
 #ifdef FEATURE_WLAN_D0WOW
@@ -3001,8 +2990,12 @@ __hif_pci_resume(struct pci_dev *pdev, bool runtime_pm)
         if (retry > MAX_REG_READ_RETRIES) {
             pr_err("%s: PCIe link is possible down!\n", __func__);
             print_config_soc_reg(sc);
-            VOS_ASSERT(0);
-            break;
+            adf_os_atomic_set(&sc->pci_link_suspended, 1);
+            adf_os_atomic_set(&sc->wow_done, 1);
+            sc->recovery = true;
+            vos_set_logp_in_progress(VOS_MODULE_ID_VOSS, TRUE);
+            vos_wlan_pci_link_down();
+            return -EACCES;
         }
 
         A_MDELAY(1);
@@ -3063,7 +3056,7 @@ skip:
         goto out;
     }
 
-    hif_enable_tasklet_noclient(sc, temp_module);
+    hif_enable_tasklet(sc, temp_module);
 
     if (!wma_is_wow_mode_selected(temp_module))
         err = wma_resume_target(temp_module, runtime_pm);

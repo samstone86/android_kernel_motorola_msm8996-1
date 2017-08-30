@@ -1395,7 +1395,7 @@ static int hdd_parse_setrmcrate_command(tANI_U8 *pValue,
         return 0;
     }
 
-    sscanf(inPtr, "%31s ", buf);
+    sscanf(inPtr, "%32s ", buf);
     v = kstrtos32(buf, 10, &tempInt);
     if ( v < 0)
     {
@@ -8768,6 +8768,19 @@ static void hdd_update_tgt_vht_cap(hdd_context_t *hdd_ctx,
 }
 #endif  /* #ifdef WLAN_FEATURE_11AC */
 
+#ifdef FEATURE_WLAN_RA_FILTERING
+static void hdd_update_ra_rate_limit(hdd_context_t *hdd_ctx,
+				     struct hdd_tgt_cfg *cfg)
+{
+    hdd_ctx->cfg_ini->IsRArateLimitEnabled = cfg->is_ra_rate_limit_enabled;
+}
+#else
+static void hdd_update_ra_rate_limit(hdd_context_t *hdd_ctx,
+				     struct hdd_tgt_cfg *cfg)
+{
+}
+#endif
+
 void hdd_update_tgt_cfg(void *context, void *param)
 {
     hdd_context_t *hdd_ctx = (hdd_context_t *)context;
@@ -8842,7 +8855,12 @@ void hdd_update_tgt_cfg(void *context, void *param)
     hdd_ctx->fine_time_meas_cap_target = cfg->fine_time_measurement_cap;
     hddLog(LOG1, FL("fine_time_measurement_cap: 0x%x"),
              hdd_ctx->cfg_ini->fine_time_meas_cap);
-    hdd_ctx->bpf_enabled = cfg->bpf_enabled;
+
+    hddLog(LOG1, FL("Target BPF %d Host BPF %d"),
+             cfg->bpf_enabled, hdd_ctx->cfg_ini->bpf_packet_filter_enable);
+    hdd_ctx->bpf_enabled = (cfg->bpf_enabled &&
+                            hdd_ctx->cfg_ini->bpf_packet_filter_enable);
+    hdd_update_ra_rate_limit(hdd_ctx, cfg);
 
     /*
      * If BPF is enabled, maxWowFilters set to WMA_STA_WOW_DEFAULT_PTRN_MAX
@@ -10144,12 +10162,11 @@ static hdd_adapter_t* hdd_alloc_station_adapter(hdd_context_t *pHddCtx,
       hdd_set_needed_headroom(pWlanDev, pWlanDev->hard_header_len);
       pWlanDev->hard_header_len += HDD_HW_NEEDED_HEADROOM;
 
-      if (pHddCtx->cfg_ini->enableIPChecksumOffload) {
+      if (pHddCtx->cfg_ini->enableIPChecksumOffload)
          pWlanDev->features |= NETIF_F_HW_CSUM;
-      } else if (pHddCtx->cfg_ini->enableTCPChkSumOffld) {
+      else if (pHddCtx->cfg_ini->enableTCPChkSumOffld)
          pWlanDev->features |= NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM;
          pWlanDev->features |= NETIF_F_RXCSUM;
-      }
       hdd_set_station_ops( pAdapter->dev );
 
       pWlanDev->destructor = free_netdev;
@@ -13602,24 +13619,6 @@ VOS_STATUS hdd_set_sme_chan_list(hdd_context_t *hdd_ctx)
                               hdd_ctx->reg.cc_src);
 }
 
-void hdd_set_dfs_regdomain(hdd_context_t *phddctx, bool restore)
-{
-    if(!restore) {
-        if (vos_nv_get_dfs_region(&phddctx->hdd_dfs_regdomain)) {
-             hddLog(VOS_TRACE_LEVEL_FATAL,
-                    "%s: unable to retrieve dfs region from hdd",
-                    __func__);
-        }
-    }
-    else {
-        if (vos_nv_set_dfs_region(phddctx->hdd_dfs_regdomain)) {
-             hddLog(VOS_TRACE_LEVEL_FATAL,
-                    "%s: unable to set dfs region",
-                    __func__);
-        }
-    }
-}
-
 /**
  * hdd_is_5g_supported() - to know if ini configuration supports 5GHz
  * @pHddCtx: Pointer to the hdd context
@@ -14441,7 +14440,6 @@ static void hdd_state_info_dump(char **buf_ptr, uint16_t *size)
 		if (adapter->dev)
 			len += scnprintf(buf + len, *size - len,
 				"\n device name: %s", adapter->dev->name);
-		else
 			len += scnprintf(buf + len, *size - len,
 				"\n device_mode: %d", adapter->device_mode);
 		switch (adapter->device_mode) {

@@ -497,7 +497,7 @@ int __hdd_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
        hdd_get_transmit_sta_id(pAdapter, pDestMacAddress, &STAId);
        if (STAId == HDD_WLAN_INVALID_STA_ID) {
-           hddLog(LOG1, "Invalid station id, transmit operation suspended");
+           hddLog(LOGE, "Invalid station id, transmit operation suspended");
            goto drop_pkt;
        }
 
@@ -1244,10 +1244,10 @@ VOS_STATUS hdd_rx_packet_cbk(v_VOID_t *vosContext,
             continue;
       }
 
-      DPTRACE(adf_dp_trace(rxBuf,
+      DPTRACE(adf_dp_trace(skb,
               ADF_DP_TRACE_RX_HDD_PACKET_PTR_RECORD,
-              adf_nbuf_data_addr(rxBuf),
-              sizeof(adf_nbuf_data(rxBuf)), ADF_RX));
+              adf_nbuf_data_addr(skb),
+              sizeof(adf_nbuf_data(skb)), ADF_RX));
 
 #ifdef QCA_PKT_PROTO_TRACE
       if ((pHddCtx->cfg_ini->gEnableDebugLog & VOS_PKT_TRAC_TYPE_EAPOL) ||
